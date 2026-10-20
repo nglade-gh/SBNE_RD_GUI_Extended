@@ -323,10 +323,13 @@ class LeftPanelTree:
         # Parameters tab: collapsible sub-sections
         self.param_groups = {
             "Simulation":  ["TEST_NAME", "SEED", "MAX_ITERATIONS", "DISPLAY_REFRESH_FPS", "MAX_SELECTED_SBN"],
-            "Agents":      ["NUM_AGENTS", "BASE_ENERGY", "DIVISION_ENERGY", "DISTANCE_VISION", "VISION_ANGLE",
-                            "CONSUME_QTY", "VALEUR_MAX_POIDS", "COST_NEURON", "COST_MOVE", "COST_ROTATE",
-                            "COST_EAT", "COST_METABOLISM"],
-            "Evolution":   ["PROBA_EVOLUTION", "PROBA_INSERTION", "PROBA_DELETION"],
+            "Agents":      ["NUM_AGENTS", "BASE_ENERGY", "DIVISION_ENERGY", "CONSUME_QTY", "VALEUR_MAX_POIDS",
+                            "COST_NEURON", "COST_MOVE", "COST_ROTATE", "COST_EAT", "COST_METABOLISM",
+                            "EYE_DISTANCE_MIN", "EYE_DISTANCE_MAX", "EYE_ANGLE_MIN", "EYE_ANGLE_MAX",
+                            "EYE_DIRECTION_MIN", "EYE_DIRECTION_MAX",
+                            "RANDOM_SBN", "CONNECTIVITE_SBN"],
+            "Evolution":   ["PROBA_EVOLUTION", "PROBA_INSERTION", "PROBA_DELETION", "PROBA_MUTATION_EYE",
+                            "EYE_MUT_LAMBDA_DISTANCE", "EYE_MUT_LAMBDA_ANGLE", "EYE_MUT_LAMBDA_DIRECTION"],
             "Environment": ["DX_GRID", "NUM_MD1_INIT", "MD1_INIT_QTY", "D_MD1", "D_MD2", "K_MD1_MD2"],
         }
         self.param_groups_expanded = {name: True for name in self.param_groups}
@@ -652,7 +655,10 @@ class LeftPanelTree:
                     y += row_h
                     continue
                 screen.blit(self.font_small.render(f"{key}:", True, COLOR_TEXT_DIM), (self.rect.x + 18, y + 4))
-                val_rect = pygame.Rect(self.rect.x + 100, y, self.rect.w - 120, row_h)
+                # Valeur justifiée à DROITE
+                txt0 = str(value)
+                val_w0 = self.font_small.size(txt0)[0]
+                val_rect = pygame.Rect(self.rect.x + self.rect.w - val_w0 - 12, y, val_w0 + 12, row_h)
                 if self.editing_key == key:
                     pygame.draw.rect(screen, (30, 40, 60), val_rect, border_radius=3)
                     txt = self.editing_text + "|"
@@ -691,16 +697,19 @@ class LeftPanelTree:
                 y += row_h
                 continue
             screen.blit(self.font_small.render(f"{key}:", True, COLOR_TEXT_DIM), (self.rect.x + 18, y + 4))
-            val_rect = pygame.Rect(self.rect.x + 100, y, self.rect.w - 120, row_h)
+            # Valeur justifiée à DROITE (jamais sur le label)
+            txt = str(value)
             if self.editing_key == key:
-                pygame.draw.rect(screen, (30, 40, 60), val_rect, border_radius=3)
                 txt = self.editing_text + "|"
                 color = COLOR_GREEN
             else:
-                txt = str(value)
                 color = COLOR_TEXT
-                if val_rect.collidepoint(pygame.mouse.get_pos()):
-                    pygame.draw.rect(screen, (30, 38, 55), val_rect, border_radius=3)
+            val_w = self.font_small.size(txt)[0]
+            val_rect = pygame.Rect(self.rect.x + self.rect.w - val_w - 12, y, val_w + 12, row_h)
+            if self.editing_key == key:
+                pygame.draw.rect(screen, (30, 40, 60), val_rect, border_radius=3)
+            elif val_rect.collidepoint(pygame.mouse.get_pos()):
+                pygame.draw.rect(screen, (30, 38, 55), val_rect, border_radius=3)
             screen.blit(self.font_small.render(txt, True, color), (val_rect.x + 6, y + 4))
             self.param_value_rects[key] = val_rect
             y += row_h
@@ -733,7 +742,10 @@ class LeftPanelTree:
                         continue
                     val_key = f"CL_DIRICHLET_{side_key}_{matter}"
                     screen.blit(self.font_small.render(f"val {matter}:", True, COLOR_TEXT_DIM), (self.rect.x + 30, y + 4))
-                    val_rect = pygame.Rect(self.rect.x + 100, y, self.rect.w - 120, row_h)
+                    # Valeur justifiée à DROITE
+                    txt_v = str(self.params.get(val_key, 0.0))
+                    val_wv = self.font_small.size(txt_v)[0]
+                    val_rect = pygame.Rect(self.rect.x + self.rect.w - val_wv - 12, y, val_wv + 12, row_h)
                     if self.editing_key == val_key:
                         pygame.draw.rect(screen, (30, 40, 60), val_rect, border_radius=3)
                         txt = self.editing_text + "|"
@@ -839,7 +851,10 @@ class LeftPanelTree:
         if y + row_h < self.rect.y + 26 or y > self.rect.bottom:
             y += row_h
         screen.blit(self.font.render("Dirichlet:", True, COLOR_TEXT), (self.rect.x + 16, y + 3))
-        val_rect = pygame.Rect(self.rect.x + 100, y, self.rect.w - 120, row_h)
+        # Valeur justifiée à DROITE
+        txt_d = str(cur)
+        val_wd = self.font_small.size(txt_d)[0]
+        val_rect = pygame.Rect(self.rect.x + self.rect.w - val_wd - 12, y, val_wd + 12, row_h)
         cur = self.params.get("CL_DIRICHLET_VALUE", 0.0)
         color = COLOR_GREEN if self.editing_key == "CL_DIRICHLET_VALUE" else COLOR_TEXT
         txt = (self.editing_text + "|") if self.editing_key == "CL_DIRICHLET_VALUE" else str(cur)

@@ -45,6 +45,8 @@ _ORIGINAL_PARAMS = {
     "PROBA_INSERTION": 0.4,
     "PROBA_EVOLUTION": 0.8,
     "PROBA_MUTATION_EYE": 0.3,
+    "RANDOM_SBN": False,
+    "CONNECTIVITE_SBN": 2,
     "VALEUR_MAX_POIDS": 5,
     "DISTANCE_VISION": 70,
     "VISION_ANGLE": 30,
@@ -68,7 +70,7 @@ _ORIGINAL_PARAMS = {
     "CL_DIRICHLET_VALUE": 0.0,
 }
 
-_SBNE_DIR = os.path.expanduser("~/.sbne_rd")
+_SBNE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Parameters")
 
 # ============================================================================
 # CONSTANTES DE LAYOUT
@@ -111,6 +113,8 @@ PARAMS = {
     "PROBA_INSERTION": 0.4,
     "PROBA_EVOLUTION": 0.8,
     "PROBA_MUTATION_EYE": 0.3,
+    "RANDOM_SBN": False,
+    "CONNECTIVITE_SBN": 2,
     "VALEUR_MAX_POIDS": 5,
     "DISTANCE_VISION": 70,
     "VISION_ANGLE": 30,
@@ -121,6 +125,13 @@ PARAMS = {
     "COST_METABOLISM": 0.1,
     "CONSUME_QTY": 100.0,  # matter (MD1/MD2) consumed per mouth attempt
     "MAX_SELECTED_SBN": 5,
+    "EYE_DISTANCE_MIN": 1.0, "EYE_DISTANCE_MAX": 100.0,
+    "EYE_ANGLE_MIN": 5.0, "EYE_ANGLE_MAX": 60.0,
+    "EYE_DIRECTION_MIN": 0.0, "EYE_DIRECTION_MAX": 360.0,
+    # Paramètres de la loi exponentielle de mutation des yeux (lambda = échelle)
+    "EYE_MUT_LAMBDA_DISTANCE": 10.0,
+    "EYE_MUT_LAMBDA_ANGLE": 10.0,
+    "EYE_MUT_LAMBDA_DIRECTION": 60.0,
     "DISPLAY_REFRESH_FPS": 30,
     # --- Reaction-diffusion MD1/MD2 ---
     "DX_GRID": 20.0,        # matter grid step (px)
@@ -192,6 +203,16 @@ class Simulation:
     """Holds the full simulation state and orchestrates logic / rendering / database."""
 
     def __init__(self, params, headless=False, max_steps=0, outdir=None):
+        # --- CHARGEMENT DES PARAMÈTRES PAR DÉFAUT (tout au début) ---
+        # Si default_params.json existe (dossier Parameters/), on le charge dans PARAMS
+        default_path = os.path.join(_SBNE_DIR, "default_params.json")
+        if os.path.exists(default_path):
+            import json as _json
+            with open(default_path, "r", encoding="utf-8") as _f:
+                _loaded = _json.load(_f)
+            for _k, _v in _loaded.items():
+                PARAMS[_k] = _v
+            params = PARAMS  # garantit qu'on utilise les valeurs chargées
         # --- PARAMÈTRES GÉNÉRAUX ---
         self.test_name = str(params.get("TEST_NAME", "Extinction_Initiale"))
         seed = params.get("SEED", 42)
@@ -243,6 +264,22 @@ class Simulation:
         self.proba_mutation_eye = params.get("PROBA_MUTATION_EYE", 0.3)
         self.valeur_max_poids = params.get("VALEUR_MAX_POIDS", 3)
 
+        # --- PARAMÈTRES DES YEUX ---
+        self.eye_distance_min = float(params.get("EYE_DISTANCE_MIN", 1.0))
+        self.eye_distance_max = float(params.get("EYE_DISTANCE_MAX", 100.0))
+        self.eye_angle_min = float(params.get("EYE_ANGLE_MIN", 5.0))
+        self.eye_angle_max = float(params.get("EYE_ANGLE_MAX", 60.0))
+        self.eye_direction_min = float(params.get("EYE_DIRECTION_MIN", 0.0))
+        self.eye_direction_max = float(params.get("EYE_DIRECTION_MAX", 360.0))
+        # Paramètres de la loi exponentielle de mutation des yeux
+        self.eye_mut_lambda_distance = float(params.get("EYE_MUT_LAMBDA_DISTANCE", 10.0))
+        self.eye_mut_lambda_angle = float(params.get("EYE_MUT_LAMBDA_ANGLE", 10.0))
+        self.eye_mut_lambda_direction = float(params.get("EYE_MUT_LAMBDA_DIRECTION", 60.0))
+
+        # --- SBN ALÉATOIRE ---
+        self.random_sbn = bool(params.get("RANDOM_SBN", False))
+        self.connectivite_sbn = int(params.get("CONNECTIVITE_SBN", 2))
+
         # --- STATISTIQUE ET VISUALISATION ---
         self.tracking_id = params.get("TRACKING_ID", None)
         self.cell_size = self.distance_vision * 1.2
@@ -284,6 +321,16 @@ class Simulation:
         self.font_tiny = pygame.font.SysFont("Arial", 10)
         self.tracked_agent = None
         self.selected_agents = []  # [agent_id, ...]
+        # Activité des organes : historique par agent sélectionné (depuis sa sélection)
+        # {agent_id: [(t0, organ_states), ...]} — organ_states = tuple des états des organes
+        self.organ_activity = {}
+        # Fenêtre glissante du graphique d'activité : nombre d'itérations affichées
+        self.activity_window = 150
+        self.activity_nav_rects = {}  # boutons + et - du graphique
+        # Historique des statistiques (graphique de suivi, fenêtre glissante)
+        self.stats_history = []  # [(t, nb_agents, energie_agents, md1, md2)]
+        self.stats_window = 2000
+        self.stats_nav_rects = {}
         self.active_brain_tab = 0
         # Redimensionnement du panneau gauche
         self.left_panel_width = LEFT_PANEL_WIDTH
@@ -294,6 +341,12 @@ class Simulation:
         # Right panel tabs: "brains" or "statistics" (click to switch)
         self.right_tab = "brains"
         self.right_tab_rects = {}
+        # Mode d'affichage du cerveau : "sbn" ou "creature"
+        self.brain_display_mode = "sbn"
+        # Layout du graphe SBN : "circular", "hierarchical", "spring"
+        self.sbn_layout = "circular"
+        # Menu déroulant du cerveau : None ou "mode" ou "layout"
+        self.brain_menu_open = None
         # Grille affichée : "MD1", "MD2" ou "BOTH" (touches 1/2/3)
         self.matter_display = "BOTH"
 
@@ -430,6 +483,20 @@ class Simulation:
 
     def _init_population(self):
         """Initializes the agent population."""
+        # Relit les paramètres à chaque appel (changement via explorateur + restart)
+        self.num_agents = int(PARAMS.get("NUM_AGENTS", 1000))
+        self.new_id = self.num_agents
+        self.random_sbn = bool(PARAMS.get("RANDOM_SBN", False))
+        self.connectivite_sbn = int(PARAMS.get("CONNECTIVITE_SBN", 2))
+        self.eye_distance_min = float(PARAMS.get("EYE_DISTANCE_MIN", 1.0))
+        self.eye_distance_max = float(PARAMS.get("EYE_DISTANCE_MAX", 100.0))
+        self.eye_angle_min = float(PARAMS.get("EYE_ANGLE_MIN", 5.0))
+        self.eye_angle_max = float(PARAMS.get("EYE_ANGLE_MAX", 60.0))
+        self.eye_direction_min = float(PARAMS.get("EYE_DIRECTION_MIN", 0.0))
+        self.eye_direction_max = float(PARAMS.get("EYE_DIRECTION_MAX", 360.0))
+        self.eye_mut_lambda_distance = float(PARAMS.get("EYE_MUT_LAMBDA_DISTANCE", 10.0))
+        self.eye_mut_lambda_angle = float(PARAMS.get("EYE_MUT_LAMBDA_ANGLE", 10.0))
+        self.eye_mut_lambda_direction = float(PARAMS.get("EYE_MUT_LAMBDA_DIRECTION", 60.0))
         self.agents = []
         for i in range(self.num_agents):
             agent = Agent(
@@ -445,8 +512,17 @@ class Simulation:
                 self.cost_eat,
                 self.cost_neuron,
                 self.cost_metabolism,
-                self.consume_qty
+                self.consume_qty,
+                eye_distance_min=self.eye_distance_min,
+                eye_distance_max=self.eye_distance_max,
+                eye_angle_min=self.eye_angle_min,
+                eye_angle_max=self.eye_angle_max,
+                eye_direction_min=self.eye_direction_min,
+                eye_direction_max=self.eye_direction_max
             )
+            # SBN aléatoire ou réseau par défaut
+            if self.random_sbn:
+                agent.init_random_sbn(self.connectivite_sbn)
             self.agents.append(agent)
             save_network_state(
                 db_path=self.db_path,
@@ -526,6 +602,24 @@ class Simulation:
             for action, rect in self.brain_nav_rects.items():
                 if rect.collidepoint(event.pos):
                     self._brain_nav(action)
+                    break
+        # Boutons +/− du graphique d'activité
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for action, rect in self.activity_nav_rects.items():
+                if rect.collidepoint(event.pos):
+                    if action == "plus":
+                        self.activity_window = min(self.activity_window + 50, 5000)
+                    elif action == "minus":
+                        self.activity_window = max(self.activity_window - 50, 10)
+                    break
+        # Boutons +/− du graphique de stats
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for action, rect in self.stats_nav_rects.items():
+                if rect.collidepoint(event.pos):
+                    if action == "plus":
+                        self.stats_window = min(self.stats_window + 500, 50000)
+                    elif action == "minus":
+                        self.stats_window = max(self.stats_window - 500, 100)
                     break
 
         # Événements UI personnalisés pygame_gui (boutons, slider…)
@@ -797,11 +891,12 @@ class Simulation:
 
             self._init_population()
             # Réinitialise le champ de matière MD1/MD2 (dépôts initiaux)
+            # NB : défauts cohérents avec PARAMS (D_MD1/D_MD2=0.5, K_MD1_MD2=0.1)
             self.field = ReactionDiffusion(self.width, self.height,
                                            float(params.get("DX_GRID", 20.0)),
-                                           D_MD1=float(params.get("D_MD1", 500.0)),
-                                           D_MD2=float(params.get("D_MD2", 500.0)),
-                                           k_MD1_MD2=float(params.get("K_MD1_MD2", 0.01)),
+                                           D_MD1=float(params.get("D_MD1", 0.5)),
+                                           D_MD2=float(params.get("D_MD2", 0.5)),
+                                           k_MD1_MD2=float(params.get("K_MD1_MD2", 0.1)),
                                            dt=1.0)
             for _ in range(int(params.get("NUM_MD1_INIT", 10))):
                 x, y = random.randint(0, self.width), random.randint(0, self.height)
@@ -832,6 +927,10 @@ class Simulation:
     # ========================================================================
     def step(self):
         self.total_steps += 1
+        # Enregistrer les stats pour le graphique de suivi (fenêtre glissante)
+        e_agents = sum(a.energy for a in self.agents)
+        md1_tot, md2_tot = self.field.totals()
+        self.stats_history.append((self.total_steps, len(self.agents), e_agents, md1_tot, md2_tot))
         new_enfants = []
 
         if self.total_steps % 50000 == 0:
@@ -860,6 +959,13 @@ class Simulation:
             neighbors = self.spatial_grid.neighbors(agent)
             agent.sense(neighbors, self.dist_manger_sq, self.field)
             actions = agent.update(self.field, agent.eye_values, self.proba_evolution, self.valeur_max_poids)
+            # Enregistrer l'activité des organes pour les agents sélectionnés
+            if agent.id in self.selected_agents and agent.alive:
+                sbn = agent.sbn
+                organ_states = tuple(int(sbn.states[i]) for i in range(sbn.NUM_ORGANS))
+                self.organ_activity.setdefault(agent.id, []).append(
+                    (self.total_steps, organ_states)
+                )
             if actions is None:
                 continue
             action_eat, action_eat_md1, action_eat_md2 = actions
@@ -878,7 +984,9 @@ class Simulation:
 
             if agent.energy >= self.division_energy:
                 enfant = agent.division(self.new_id, self.vision_angle, self.proba_deletion, self.proba_insertion,
-                                        self.valeur_max_poids, self.proba_mutation_eye, self.total_steps)
+                                        self.valeur_max_poids, self.proba_mutation_eye, self.total_steps,
+                                        self.eye_mut_lambda_distance, self.eye_mut_lambda_angle,
+                                        self.eye_mut_lambda_direction)
                 self.new_id += 1
                 new_enfants.append(enfant)
                 save_network_state(
@@ -934,6 +1042,10 @@ class Simulation:
         dead_selected = [aid for aid in self.selected_agents if aid not in alive_ids]
         if dead_selected:
             self.selected_agents = [aid for aid in self.selected_agents if aid in alive_ids]
+            # Nettoyer l'activité des agents morts
+            for aid in list(self.organ_activity.keys()):
+                if aid not in alive_ids:
+                    del self.organ_activity[aid]
             self.left_panel.update_selected(self.selected_agents)
         self.agents.extend(new_enfants)
 
@@ -1105,8 +1217,7 @@ class Simulation:
         pygame.draw.line(screen, col, (cx + 7, cy - 7), (cx - 7, cy + 7), t)
 
     def _draw_right_panel(self):
-        """Panneau droit à 2 onglets sélectionnables : CERVEAUX et STATISTIQUES.
-        Un clic sur un onglet affiche son contenu (jamais les deux en même temps)."""
+        """Panneau droit à 3 onglets : BRAIN, CREATURE, STATISTICS."""
         panel_x = self.win_width - RIGHT_PANEL_WIDTH
         panel_y = TOP_BAR_HEIGHT
         panel_h = TOP_BAR_HEIGHT + DASHBOARD_SIZE + self.height - panel_y
@@ -1116,9 +1227,9 @@ class Simulation:
         pygame.draw.rect(self.screen, COLOR_PANEL_BG, (panel_x, panel_y, RIGHT_PANEL_WIDTH, panel_h))
         self.brain_nav_rects = {}
 
-        # --- Barre d'onglets (2 boutons en haut du panneau droit) ---
-        tab_w = (RIGHT_PANEL_WIDTH - 20) // 2
-        for i, name in enumerate(("BRAINS", "STATISTICS")):
+        # --- Barre d'onglets (3 boutons en haut du panneau droit) ---
+        tab_w = (RIGHT_PANEL_WIDTH - 20) // 3
+        for i, name in enumerate(("BRAIN", "CREATURE", "STATISTICS")):
             r = pygame.Rect(panel_x + 10 + i * (tab_w + 4), panel_y + 5, tab_w, 20)
             self.right_tab_rects[name] = r
             active = (self.right_tab == name.lower())
@@ -1128,8 +1239,10 @@ class Simulation:
             self.screen.blit(lbl, (r.x + 8, r.y + 3))
 
         # --- Contenu selon l'onglet actif ---
-        if self.right_tab in ("brains", "cerveau", "cerveaux"):
+        if self.right_tab in ("brain", "brains", "cerveau", "cerveaux"):
             self._draw_brains_content(panel_x, content_top, content_h)
+        elif self.right_tab == "creature":
+            self._draw_creature_content(panel_x, content_top, content_h)
         else:
             self._draw_stats_content(panel_x, content_top, content_h)
 
@@ -1149,18 +1262,25 @@ class Simulation:
         gap = 10
         total_w = sum(widths) + gap * max(0, len(ids) - 1)
         x = panel_x + max(4, (RIGHT_PANEL_WIDTH - total_w) // 2)
+        y_list = top + 6
         for i, t in enumerate(ids):
             color = COLOR_RED if i == self.active_brain_tab else COLOR_TEXT
-            self.screen.blit(font_id.render(t, True, color), (x, top + 6))
+            self.screen.blit(font_id.render(t, True, color), (x, y_list))
             x += widths[i] + gap
+        y_list_end = y_list + 13
 
         # Agent affiché : grand numéro + prev1/next1 gris de part et d'autre
-        displayed = self.selected_agents[self.active_brain_tab] if self.selected_agents else None
+        # (active_brain_tab borné : la liste peut avoir été raccourcie par la mort d'agents)
+        if self.selected_agents:
+            self.active_brain_tab = min(self.active_brain_tab, len(self.selected_agents) - 1)
+            displayed = self.selected_agents[self.active_brain_tab]
+        else:
+            displayed = None
         num_txt = str(displayed) if displayed is not None else "-"
         font_big = pygame.font.SysFont("Arial", 20, bold=True)
         tw = font_big.size(num_txt)[0]
         nx = panel_x + (RIGHT_PANEL_WIDTH - tw) // 2
-        ny = top + 28
+        ny = y_list_end + 4
         prev1 = pygame.Rect(nx - 24, ny, 16, 16)
         next1 = pygame.Rect(nx + tw + 8, ny, 16, 16)
         self._draw_triangle(self.screen, prev1.centerx, prev1.centery, "left", (150, 158, 170))
@@ -1170,19 +1290,199 @@ class Simulation:
         color_big = COLOR_YELLOW if displayed is not None else COLOR_TEXT_DIM
         self.screen.blit(font_big.render(num_txt, True, color_big), (nx, ny))
 
+        # --- Menu layout SOUS la zone de sélection ---
+        menu_w = 150
+        menu_h = 18
+        menu_y = ny + 24  # sous le grand numéro et ses flèches prev1/next1
+        layout_rect = pygame.Rect(panel_x + 8, menu_y, menu_w, menu_h)
+        pygame.draw.rect(self.screen, COLOR_TAB_INACTIVE, layout_rect, border_radius=3)
+        pygame.draw.rect(self.screen, COLOR_BORDER, layout_rect, 1, border_radius=3)
+        self.screen.blit(self.font_small.render(self.sbn_layout + "  ▾", True, COLOR_TEXT),
+                         (layout_rect.x + 6, layout_rect.y + 3))
+        self.brain_nav_rects["layout_menu"] = layout_rect
+
+        # Options ouvertes du menu déroulant layout
+        if self.brain_menu_open == "layout":
+            options = [("circular", "circular"), ("hierarchical", "hierarchical"), ("spring", "spring")]
+            for i, (lbl, val) in enumerate(options):
+                opt_rect = pygame.Rect(layout_rect.x, layout_rect.bottom + 2 + i * 18, menu_w, 18)
+                pygame.draw.rect(self.screen, COLOR_TAB_INACTIVE, opt_rect, border_radius=3)
+                pygame.draw.rect(self.screen, COLOR_BORDER, opt_rect, 1, border_radius=3)
+                self.screen.blit(self.font_small.render(lbl, True, COLOR_TEXT),
+                                 (opt_rect.x + 6, opt_rect.y + 2))
+                self.brain_nav_rects[f"layout_opt_{val}"] = opt_rect
+
+        # Zone de dessin du cerveau (tout l'espace restant)
+        graph_top = max(ny + 30, menu_y + menu_h + 3 * 18 + 8)
+        graph_h = max(60, self.win_height - CONSOLE_HEIGHT - 8 - graph_top)
+        graph_bottom = graph_top + graph_h
+
         # Graphe SBN de l'agent affiché
-        graph_top = ny + 30
         if displayed is not None:
             agent = next((a for a in self.agents if a.id == displayed), None)
             if agent:
                 self._draw_sbn_graph(panel_x + 8, graph_top, RIGHT_PANEL_WIDTH - 16,
-                                     self.win_height - CONSOLE_HEIGHT - 8 - graph_top, agent)
+                                    self.win_height - CONSOLE_HEIGHT - 8 - graph_top, agent)
             else:
                 surf = self.font_small.render("Dead agent", True, COLOR_YELLOW)
                 self.screen.blit(surf, (panel_x + 10, graph_top + 4))
         else:
             surf = self.font_small.render("No agent selected", True, COLOR_TEXT_DIM)
             self.screen.blit(surf, (panel_x + 10, graph_top + 4))
+
+    def _draw_creature_content(self, panel_x, top, h):
+        """Onglet CREATURE : créature (cercle + organes + cônes) en haut,
+        diagramme d'activité des organes en bas (temps de suivi vs type d'organe,
+        point coloré quand actif, rien quand inactif — lignes de points et trous)."""
+        nav_y = top
+        # --- Navigation : liste agents sélectionnés + prev/next ---
+        ids = [str(i) for i in self.selected_agents]
+        font_id = pygame.font.SysFont("Arial", 13)
+        gap = 10
+        x = panel_x + 10
+        for i, t in enumerate(ids):
+            color = COLOR_RED if i == self.active_brain_tab else COLOR_TEXT
+            self.screen.blit(font_id.render(t, True, color), (x, nav_y))
+            x += font_id.size(t)[0] + gap
+        nav_y += 18
+
+        if self.selected_agents:
+            self.active_brain_tab = min(self.active_brain_tab, len(self.selected_agents) - 1)
+            displayed = self.selected_agents[self.active_brain_tab]
+        else:
+            displayed = None
+
+        num_txt = str(displayed) if displayed is not None else "-"
+        font_big = pygame.font.SysFont("Arial", 18, bold=True)
+        nx = panel_x + (RIGHT_PANEL_WIDTH - font_big.size(num_txt)[0]) // 2
+        prev1 = pygame.Rect(nx - 22, nav_y, 14, 14)
+        next1 = pygame.Rect(nx + font_big.size(num_txt)[0] + 6, nav_y, 14, 14)
+        self._draw_triangle(self.screen, prev1.centerx, prev1.centery, "left", (150, 158, 170))
+        self._draw_triangle(self.screen, next1.centerx, next1.centery, "right", (150, 158, 170))
+        self.brain_nav_rects["creature_prev1"] = prev1
+        self.brain_nav_rects["creature_next1"] = next1
+        color_big = COLOR_YELLOW if displayed is not None else COLOR_TEXT_DIM
+        self.screen.blit(font_big.render(num_txt, True, color_big), (nx, nav_y))
+        nav_y += 22
+
+        # --- Zone créature (55% de la hauteur) et diagramme activité (45%) ---
+        creature_h = int(h * 0.55)
+        graph_top = nav_y + 2
+
+        if displayed is not None:
+            agent = next((a for a in self.agents if a.id == displayed), None)
+            if agent:
+                self._draw_creature_view(panel_x + 8, graph_top, RIGHT_PANEL_WIDTH - 16,
+                                        creature_h, agent)
+            else:
+                surf = self.font_small.render("Dead agent", True, COLOR_YELLOW)
+                self.screen.blit(surf, (panel_x + 10, graph_top + 4))
+        else:
+            surf = self.font_small.render("No agent selected", True, COLOR_TEXT_DIM)
+            self.screen.blit(surf, (panel_x + 10, graph_top + 4))
+
+        # --- Diagramme d'activité des organes ---
+        act_top = graph_top + creature_h + 6
+        act_h = max(50, h - (act_top - top))
+        self._draw_organ_activity(panel_x + 8, act_top, RIGHT_PANEL_WIDTH - 16, act_h,
+                                  displayed)
+
+    def _draw_organ_activity(self, x, y, w, h, agent_id):
+        """Diagramme d'activité : abscisse = temps de suivi (fenêtre glissante de
+        N itérations, N réglable via les boutons +/−), ordonnée = organe (une ligne
+        chacun). Point coloré quand actif, rien quand inactif → lignes de points
+        avec trous."""
+        if agent_id is None:
+            surf = self.font_small.render("No agent selected", True, COLOR_TEXT_DIM)
+            self.screen.blit(surf, (x + 5, y + 5))
+            return
+        history = self.organ_activity.get(agent_id, [])
+        if not history:
+            surf = self.font_small.render("No activity data (select agent)", True, COLOR_TEXT_DIM)
+            self.screen.blit(surf, (x + 5, y + 5))
+            return
+
+        organ_names = ["E1", "E2", "E3", "M", "M1", "M2", "F", "B", "SL", "SR", "RL", "RR"]
+        organ_colors = [
+            (80, 200, 255), (80, 200, 255), (80, 200, 255),
+            (255, 100, 100), (255, 150, 100), (255, 200, 100),
+            (100, 255, 100), (100, 200, 255),
+            (255, 255, 100), (255, 255, 100),
+            (180, 180, 255), (180, 180, 255),
+        ]
+        n_organs = len(organ_names)
+        label_w = 30
+        # Réservé pour la barre de contrôle (+/−) en haut
+        ctrl_h = 22
+        plot_w = w - label_w - 10
+        plot_h = h - ctrl_h - 20
+        if plot_w < 20 or plot_h < 10:
+            return
+
+        # Ligne de base
+        pygame.draw.rect(self.screen, (18, 24, 34), (x, y, w, h), border_radius=4)
+
+        # --- Barre de contrôle : champ N entouré de − et + ---
+        btn_w = 16
+        btn_h = 16
+        field_w = 36
+        ctrl_y = y + 3
+        total_ctrl_w = btn_w + field_w + btn_w
+        ctrl_x = x + (w - total_ctrl_w) // 2
+        # Bouton −
+        minus_rect = pygame.Rect(ctrl_x, ctrl_y, btn_w, btn_h)
+        pygame.draw.rect(self.screen, COLOR_TAB_INACTIVE, minus_rect, border_radius=3)
+        pygame.draw.rect(self.screen, COLOR_BORDER, minus_rect, 1, border_radius=3)
+        surf = self.font_small.render("−", True, COLOR_TEXT)
+        self.screen.blit(surf, (minus_rect.centerx - surf.get_width() / 2,
+                                minus_rect.centery - surf.get_height() / 2))
+        self.activity_nav_rects["minus"] = minus_rect
+        # Champ N
+        field_rect = pygame.Rect(ctrl_x + btn_w, ctrl_y, field_w, btn_h)
+        pygame.draw.rect(self.screen, (25, 35, 50), field_rect, border_radius=3)
+        pygame.draw.rect(self.screen, COLOR_BORDER, field_rect, 1, border_radius=3)
+        surf = self.font_tiny.render(str(self.activity_window), True, COLOR_TEXT)
+        self.screen.blit(surf, (field_rect.centerx - surf.get_width() / 2,
+                                field_rect.centery - surf.get_height() / 2))
+        # Bouton +
+        plus_rect = pygame.Rect(ctrl_x + btn_w + field_w, ctrl_y, btn_w, btn_h)
+        pygame.draw.rect(self.screen, COLOR_TAB_INACTIVE, plus_rect, border_radius=3)
+        pygame.draw.rect(self.screen, COLOR_BORDER, plus_rect, 1, border_radius=3)
+        surf = self.font_small.render("+", True, COLOR_TEXT)
+        self.screen.blit(surf, (plus_rect.centerx - surf.get_width() / 2,
+                                plus_rect.centery - surf.get_height() / 2))
+        self.activity_nav_rects["plus"] = plus_rect
+
+        # --- Fenêtre glissante : N dernières itérations ---
+        n = min(self.activity_window, len(history))
+        window = history[-n:]
+        row_h = plot_h / n_organs
+        t0 = window[0][0]
+        t_max = max(window[-1][0] - t0, 1)
+        for k in range(n_organs):
+            ly = y + ctrl_h + 8 + k * row_h
+            # Étiquette organe
+            surf = self.font_tiny.render(organ_names[k], True, COLOR_TEXT_DIM)
+            self.screen.blit(surf, (x + 2, int(ly + row_h / 2 - 5)))
+            # Ligne pointillée de fond
+            pygame.draw.line(self.screen, (40, 50, 65),
+                             (x + label_w, int(ly + row_h / 2)),
+                             (x + w - 6, int(ly + row_h / 2)), 1)
+
+        # Points d'activité : coloré quand actif, rien quand inactif
+        for t, states in window:
+            px = x + label_w + int((t - t0) / t_max * plot_w)
+            for k in range(n_organs):
+                if k < len(states) and states[k] == 1:
+                    py = y + ctrl_h + 8 + k * row_h + row_h / 2
+                    pygame.draw.circle(self.screen, organ_colors[k], (px, int(py)), 2)
+
+        # Axe temps (abscisse)
+        font_ax = pygame.font.SysFont("Arial", 9)
+        surf = font_ax.render(f"t={t0}", True, COLOR_TEXT_DIM)
+        self.screen.blit(surf, (x + label_w, y + h - 12))
+        surf = font_ax.render(f"t={t0 + t_max}", True, COLOR_TEXT_DIM)
+        self.screen.blit(surf, (x + w - 6 - surf.get_width(), y + h - 12))
 
     def _draw_stats_content(self, panel_x, top, h):
         """Contenu onglet STATISTIQUES : les stats dans la zone disponible."""
@@ -1209,17 +1509,134 @@ class Simulation:
             "Selected": len(self.selected_agents),
         }
         y = top + 6
+        stats_block_bottom = y + 18 * len(stats) + 10
         for key, value in stats.items():
-            if y + 18 > top + h - 8:
+            if stats_block_bottom + 18 > top + h - 200:
                 break
             lbl = self.font_small.render(f"{key}:", True, COLOR_TEXT_DIM)
             self.screen.blit(lbl, (panel_x + 10, y))
             val = self.font_small.render(str(value), True, COLOR_TEXT)
-            self.screen.blit(val, (panel_x + 130, y))
-            y += 20
+            self.screen.blit(val, (panel_x + RIGHT_PANEL_WIDTH - 10 - val.get_width(), y))
+            y += 18
+        # --- Graphique de suivi (fenêtre glissante réglable) ---
+        graph_top = max(y + 8, top + 120)
+        graph_h = max(80, top + h - graph_top)
+        self._draw_stats_graph(panel_x + 8, graph_top, RIGHT_PANEL_WIDTH - 16, graph_h)
+        return  # statistiques textuelles déjà affichées
+
+    def _draw_stats_graph(self, x, y, w, h):
+        """Graphique de suivi : fenêtre glissante de N itérations, 4 courbes
+        (MD1, MD2, nb agents, énergie agents). Boutons +/− pour régler N."""
+        history = self.stats_history
+        # Barre de contrôle (boutons − et +, champ N)
+        btn_w = 16; btn_h = 16; field_w = 44
+        ctrl_y = y + 3
+        total_ctrl_w = btn_w + field_w + btn_w
+        ctrl_x = x + (w - total_ctrl_w) // 2
+        minus_rect = pygame.Rect(ctrl_x, ctrl_y, btn_w, btn_h)
+        pygame.draw.rect(self.screen, COLOR_TAB_INACTIVE, minus_rect, border_radius=3)
+        pygame.draw.rect(self.screen, COLOR_BORDER, minus_rect, 1, border_radius=3)
+        surf = self.font_small.render("−", True, COLOR_TEXT)
+        self.screen.blit(surf, (minus_rect.centerx - surf.get_width() // 2,
+                                minus_rect.centery - surf.get_height() // 2))
+        self.stats_nav_rects["minus"] = minus_rect
+        field_rect = pygame.Rect(ctrl_x + btn_w, ctrl_y, field_w, btn_h)
+        pygame.draw.rect(self.screen, (25, 35, 50), field_rect, border_radius=3)
+        pygame.draw.rect(self.screen, COLOR_BORDER, field_rect, 1, border_radius=3)
+        surf = self.font_tiny.render(str(self.stats_window), True, COLOR_TEXT)
+        self.screen.blit(surf, (field_rect.centerx - surf.get_width() // 2,
+                                field_rect.centery - surf.get_height() // 2))
+        plus_rect = pygame.Rect(ctrl_x + btn_w + field_w, ctrl_y, btn_w, btn_h)
+        pygame.draw.rect(self.screen, COLOR_TAB_INACTIVE, plus_rect, border_radius=3)
+        pygame.draw.rect(self.screen, COLOR_BORDER, plus_rect, 1, border_radius=3)
+        surf = self.font_small.render("+", True, COLOR_TEXT)
+        self.screen.blit(surf, (plus_rect.centerx - surf.get_width() / 2,
+                                plus_rect.centery - surf.get_height() // 2))
+        self.stats_nav_rects["plus"] = plus_rect
+
+        plot_top = ctrl_y + btn_h + 4
+        plot_h = h - (plot_top - y) - 14
+        if plot_h < 20:
+            return
+        if not history:
+            surf = self.font_small.render("No data (run simulation)", True, COLOR_TEXT_DIM)
+            self.screen.blit(surf, (x + 5, plot_top + 5))
+            return
+
+        # Fenêtre glissante : N dernières entrées
+        n = min(self.stats_window, len(history))
+        window = history[-n:]
+        t0, t1 = window[0][0], window[-1][0]
+        dt = max(t1 - t0, 1)
+
+        # Normalisation systématique 0..1 (min → 0, max → 1) par métrique
+        def normalize(vals):
+            lo, hi = min(vals), max(vals)
+            span = hi - lo
+            if span < 1e-9:
+                return [0.5] * len(vals), lo, hi
+            return [(v - lo) / span for v in vals], lo, hi
+
+        series_defs = [
+            ("Agents",      [a for _, a, _, _, _ in window], (100, 200, 255)),
+            ("Agent energy", [e for _, _, e, _, _ in window], (255, 220, 100)),
+            ("MD1",         [m1 for _, _, _, m1, _ in window], (255, 100, 100)),
+            ("MD2",         [m2 for _, _, _, _, m2 in window], (100, 255, 100)),
+        ]
+        series = []
+        for name, vals, color in series_defs:
+            normed, lo, hi = normalize(vals)
+            series.append((name, [(t, v) for (t, *_), v in zip(window, normed)], color, lo, hi))
+
+        # Fond + grille
+        pygame.draw.rect(self.screen, (18, 24, 34), (x, plot_top, w, plot_h), border_radius=4)
+        for frac in (0.25, 0.5, 0.75):
+            gy = plot_top + int(plot_h * frac)
+            pygame.draw.line(self.screen, (35, 45, 60), (x + 4, gy), (x + w - 4, gy), 1)
+        # Courbes
+        for name, pts, color, _, _ in series:
+            px_prev = py_prev = None
+            for t, v in pts:
+                px = x + 4 + int((t - t0) / dt * (w - 8))
+                py = plot_top + plot_h - int(v * (plot_h - 4)) - 2
+                if px_prev is not None:
+                    pygame.draw.line(self.screen, color, (px_prev, py_prev), (px, py), 1)
+                px_prev, py_prev = px, py
+        # Min/Max au-dessus du graphique (sous le selecteur), code couleur
+        font_leg = pygame.font.SysFont("Arial", 9)
+        my = plot_top - 11
+        lx = x + 4
+        for name, _, color, lo, hi in series:
+            lbl = f"{name}: {lo:.0f}–{hi:.0f}"
+            surf = font_leg.render(lbl, True, color)
+            self.screen.blit(surf, (lx, my))
+            lx += surf.get_width() + 10
+        # Axe temps
+        surf = font_leg.render(f"t={t0}", True, COLOR_TEXT_DIM)
+        self.screen.blit(surf, (x + 4, plot_top + plot_h - 12))
+        surf = font_leg.render(f"t={t1}", True, COLOR_TEXT_DIM)
+        self.screen.blit(surf, (x + w - 4 - surf.get_width(), plot_top + plot_h - 12))
 
     @staticmethod
-    def _draw_triangle(screen, cx, cy, direction, color):
+    def _draw_arrow(screen, x1, y1, x2, y2, color, width=1):
+        """Dessine une flèche de (x1,y1) vers (x2,y2) avec pointe sur (x2,y2)."""
+        pygame.draw.line(screen, color, (x1, y1), (x2, y2), width)
+        dx, dy = x2 - x1, y2 - y1
+        dist = math.hypot(dx, dy)
+        if dist < 1:
+            return
+        ux, uy = dx / dist, dy / dist
+        # Pointe (triangle)
+        plen = 6 + width * 2
+        pw = 5 + width
+        bx, by = x2 - ux * plen, y2 - uy * plen
+        px, py = -uy * pw, ux * pw
+        p1 = (bx + px, by + py)
+        p2 = (bx - px, by - py)
+        # Triangle : base (p1, p2) → pointe (x2, y2)
+        pygame.draw.polygon(screen, color, [p1, p2, (x2, y2)])
+
+    def _draw_triangle(self, screen, cx, cy, direction, color):
         """Triangle gris cliquable (left/right)."""
         s = 7
         if direction == "left":
@@ -1229,6 +1646,26 @@ class Simulation:
         pygame.draw.polygon(screen, color, pts)
 
     def _brain_nav(self, action):
+        # Menus déroulants du cerveau
+        if action == "mode_menu":
+            self.brain_menu_open = "mode" if self.brain_menu_open != "mode" else None
+            return
+        if action.startswith("mode_opt_"):
+            val = action[len("mode_opt_"):]
+            self.brain_display_mode = val
+            self.brain_menu_open = None
+            self.console.info(f"Brain display mode: {val}")
+            return
+        if action == "layout_menu":
+            self.brain_menu_open = "layout" if self.brain_menu_open != "layout" else None
+            return
+        if action.startswith("layout_opt_"):
+            val = action[len("layout_opt_"):]
+            self.sbn_layout = val
+            self.brain_menu_open = None
+            self.console.info(f"SBN layout: {val}")
+            return
+        # Navigation standard
         """Navigation cerveau :
         - prev1/next1 : défiler la sélection parmi TOUS les agents vivants
           (depuis l'affiché), wrap ; le nouvel agent prend la place de l'affiché.
@@ -1259,6 +1696,86 @@ class Simulation:
             self.active_brain_tab = (self.active_brain_tab + step) % n
             self.console.info(f"Displayed agent: {self.selected_agents[self.active_brain_tab]}")
 
+    def _draw_creature_view(self, x, y, w, h, agent):
+        """Représentation physique de la créature :
+        - Taille du cercle = énergie courante / DIVISION_ENERGY (normalisée 0..1)
+        - Sur le cercle : uniquement les organes orientés (3 yeux + 4 mouvements)
+        - Cônes de vision depuis chaque œil"""
+        cx = x + w / 2
+        cy = y + h / 2
+
+        # --- Taille du cercle = énergie normalisée par DIVISION_ENERGY ---
+        ratio = max(0.0, min(agent.energy / self.division_energy, 1.0))
+        max_r = min(w, h) // 2 - 10
+        body_r = max(20, int(max_r * ratio))
+        if body_r < 10:
+            return
+
+        sbn = agent.sbn
+        n = sbn.num_nodes
+
+        # --- Organes orientés : 3 yeux + 4 mouvements (F, B, SL, SR) ---
+        # Yeux : direction relative à l'agent (paramètre direction)
+        # Moves : F devant (0°), B derrière (180°), SL gauche (-90°), SR droite (90°)
+        oriented_organs = {
+            0: ('E1', (80, 200, 255)), 1: ('E2', (80, 200, 255)), 2: ('E3', (80, 200, 255)),
+            6: ('F', (100, 255, 100)), 7: ('B', (100, 200, 255)),
+            8: ('SL', (255, 255, 100)), 9: ('SR', (255, 255, 100)),
+        }
+        move_angles = {6: 0, 7: 180, 8: -90, 9: 90}
+
+        # Positions des organes sur le cercle (rayon = body_r)
+        organ_pos = {}
+        for idx, (label, color) in oriented_organs.items():
+            if idx in (0, 1, 2) and idx < len(agent.eyes):
+                # Yeux : direction relative de l'agent
+                abs_deg = agent.eyes[idx][2] % 360
+            else:
+                # Moves : angles fixes relatifs à l'agent
+                abs_deg = move_angles.get(idx, 0)
+            # Position relative à l'agent (pas de rotation avec agent.angle)
+            rad = math.radians(abs_deg)
+            organ_pos[idx] = (cx + body_r * math.cos(rad),
+                              cy + body_r * math.sin(rad))
+
+        # --- Corps de la créature (cercle dont la taille varie avec l'énergie) ---
+        # Couleur : vert si énergie haute, rouge si basse
+        body_color = (int(255 * (1 - ratio)), int(255 * ratio), 50)
+        pygame.draw.circle(self.screen, body_color, (int(cx), int(cy)), int(body_r))
+        pygame.draw.circle(self.screen, COLOR_BORDER, (int(cx), int(cy)), int(body_r), 2)
+
+        # --- Organes orientés sur le cercle ---
+        for idx, (label, color) in oriented_organs.items():
+            ox, oy = organ_pos[idx]
+            actif = idx < n and sbn.states[idx] == 1
+            fill = color if actif else tuple(c // 2 + 40 for c in color)
+            pygame.draw.circle(self.screen, fill, (int(ox), int(oy)), 8)
+            pygame.draw.circle(self.screen, COLOR_BORDER, (int(ox), int(oy)), 8, 1)
+            surf = self.font_tiny.render(label, True, COLOR_TEXT)
+            self.screen.blit(surf, (int(ox) - surf.get_width() / 2, int(oy) - surf.get_height() / 2))
+
+        # --- Cônes de vision depuis chaque œil ---
+        for idx in (0, 1, 2):
+            if idx >= len(agent.eyes):
+                continue
+            dist_eye, angle_eye, direction_eye = agent.eyes[idx][:3]
+            left_rad = math.radians(direction_eye - angle_eye)
+            right_rad = math.radians(direction_eye + angle_eye)
+            p_left = (cx + dist_eye * math.cos(left_rad), cy + dist_eye * math.sin(left_rad))
+            p_right = (cx + dist_eye * math.cos(right_rad), cy + dist_eye * math.sin(right_rad))
+            # Zone du cône (semi-transparente)
+            overlay = pygame.Surface((int(w), int(h)), pygame.SRCALPHA)
+            cone_color = (255, 255, 255, 15) if agent.eye_values[idx] == 0 else (255, 200, 100, 35)
+            pygame.draw.polygon(overlay, cone_color,
+                                [(int(cx), int(cy)), (int(p_left[0]), int(p_left[1])),
+                                 (int(p_right[0]), int(p_right[1]))])
+            self.screen.blit(overlay, (int(x), int(y)))
+            # Bords du cône
+            pygame.draw.line(self.screen, (200, 220, 255, 80),
+                             (int(cx), int(cy)), (int(p_left[0]), int(p_left[1])), 1)
+            pygame.draw.line(self.screen, (200, 220, 255, 80),
+                             (int(cx), int(cy)), (int(p_right[0]), int(p_right[1])), 1)
+
     def _draw_sbn_graph(self, x, y, w, h, agent):
         """Dessine le graphe SBN d'un agent dans le rectangle donné.
         Rayon et centre calculés pour que TOUT le graphe (nœuds, étiquettes,
@@ -1286,23 +1803,47 @@ class Simulation:
         cy = y + margin_top + avail_h / 2  # centre décalé : plus de place en bas (boucles)
 
         pos = []
-        for i in range(n):
-            ang = -math.pi / 2 + 2 * math.pi * i / n
-            pos.append((cx + radius * math.cos(ang), cy + radius * math.sin(ang)))
+        if self.sbn_layout == "circular":
+            for i in range(n):
+                ang = -math.pi / 2 + 2 * math.pi * i / n
+                pos.append((cx + radius * math.cos(ang), cy + radius * math.sin(ang)))
+        elif self.sbn_layout == "hierarchical":
+            # Organes en haut, autres nœuds en bas
+            organs = [i for i in range(n) if sbn.true_ids[i] < sbn.NUM_ORGANS]
+            others = [i for i in range(n) if sbn.true_ids[i] >= sbn.NUM_ORGANS]
+            for k, i in enumerate(organs):
+                px = cx + (k - (len(organs) - 1) / 2) * (2 * radius / max(1, len(organs)))
+                pos.append((px, cy - radius * 0.4))
+            for k, i in enumerate(others):
+                px = cx + (k - (len(others) - 1) / 2) * (2 * radius / max(1, len(others)))
+                pos.append((px, cy + radius * 0.4))
+        else:  # "spring" : positions fixes pseudo-aléatoires (déterministes)
+            for i in range(n):
+                ang = -math.pi / 2 + 2 * math.pi * ((i * 7) % n) / n
+                r = radius * (0.6 + 0.4 * ((i * 13) % 5) / 5)
+                pos.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
 
         NAMES = {0: "E1", 1: "E2", 2: "E3", 3: "M", 4: "M1", 5: "M2",
-                 6: "F", 7: "B", 8: "SL", 9: "SR", 10: "R",
-                 11: "R1", 12: "R2", 13: "R3", 14: "R4"}
+                 6: "F", 7: "B", 8: "SL", 9: "SR", 10: "RL", 11: "RR",
+                 12: "R1", 13: "R2", 14: "R3", 15: "R4"}
         labels = [NAMES.get(sbn.true_ids[i], f"N{sbn.true_ids[i]}") for i in range(n)]
-        is_organ = [sbn.true_ids[i] < 11 for i in range(n)]
+        is_organ = [sbn.true_ids[i] < 12 for i in range(n)]
 
-        # Arêtes
+        # Arêtes (flèches avec couleur proportionnelle au poids)
+        # Plus |wgt| est proche de 0, plus la couleur est sombre
+        wgt_max = max(abs(int(sbn.weights[i, j])) for i in range(n) for j in range(n)
+                      if int(sbn.weights[i, j]) != 0) if n > 0 else 1
         for i in range(n):
             for j in range(n):
                 wgt = int(sbn.weights[i, j])
                 if wgt == 0:
                     continue
-                color = (80, 200, 90) if wgt > 0 else (225, 75, 75)
+                # Intensité : 0.3 (proche de 0) → 1.0 (poids max)
+                intensity = 0.3 + 0.7 * (abs(wgt) / max(wgt_max, 1))
+                if wgt > 0:
+                    color = (int(80 * intensity), int(200 * intensity), int(90 * intensity))
+                else:
+                    color = (int(225 * intensity), int(75 * intensity), int(75 * intensity))
                 e_width = min(1 + abs(wgt), 4)
                 if i == j:
                     nx_, ny_ = pos[i]
@@ -1319,7 +1860,8 @@ class Simulation:
                     sy = y1 + uy * (node_r + 2)
                     ex = x2 - ux * (node_r + 6)
                     ey = y2 - uy * (node_r + 6)
-                    pygame.draw.line(self.screen, color, (sx, sy), (ex, ey), e_width)
+                    # Flèche complète (ligne + pointe) sur le nœud destination
+                    self._draw_arrow(self.screen, sx, sy, ex, ey, color, e_width)
 
         # Nœuds
         for i in range(n):

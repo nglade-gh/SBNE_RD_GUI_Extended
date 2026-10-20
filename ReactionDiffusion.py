@@ -295,6 +295,11 @@ class ReactionDiffusion:
             rhs_y += self.dt * source.T * 0.5
         u_new_T = self._solve_dir(rhs_y, cl['y_top'], cl['y_bottom'], cache_y)
         u[:] = u_new_T.T
+        # Ré-appliquer Dirichlet après le demi-pas y (qui a modifié les bords x)
+        if isinstance(cl['x_left'], tuple) and cl['x_left'][0] == "DIRICHLET":
+            u[:, 0] = cl['x_left'][1]
+        if isinstance(cl['x_right'], tuple) and cl['x_right'][0] == "DIRICHLET":
+            u[:, -1] = cl['x_right'][1]
 
     def _solve_dir(self, r, cl_left, cl_right, cache):
         """Résout des systèmes tridiagonaux (m lignes) avec conditions aux limites.

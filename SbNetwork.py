@@ -16,10 +16,11 @@ class SbNetwork:
     MOVE_BACKWARD = 7  # Mouvement vers l'arrière
     MOVE_STRAFE_LEFT = 8   # Mouvement latéral gauche
     MOVE_STRAFE_RIGHT = 9  # Mouvement latéral droit
-    ROTATE = 10       # Nageoire R (action : tourner)
-    NUM_ORGANS = 11          # premier index supprimerable
-    INITIAL_NODES = 15       # organes (0-10) + chaîne de rotation (11-14)
-    NEXT_HISTORICAL_ID_0 = 11  # le prochain neurone créé s'appellera N11
+    ROTATE_LEFT = 10    # Rotation à gauche (5°)
+    ROTATE_RIGHT = 11   # Rotation à droite (5°)
+    NUM_ORGANS = 12          # premier index supprimerable
+    INITIAL_NODES = 16       # organes (0-11) + chaînes rotation (12-15)
+    NEXT_HISTORICAL_ID_0 = 12  # le prochain neurone créé s'appellera N12
 
     def __init__(self):
         self.num_nodes = self.INITIAL_NODES
@@ -27,7 +28,8 @@ class SbNetwork:
         self.weights = np.zeros((self.num_nodes, self.num_nodes), dtype=int)
 
         self.states[self.MOVE_FORWARD] = 1
-        self.states[self.ROTATE] = 1
+        self.states[self.ROTATE_LEFT] = 0
+        self.states[self.ROTATE_RIGHT] = 0
 
         for eye in (self.EYE_1, self.EYE_2, self.EYE_3):
             self.weights[eye, self.MOUTH] = 1
@@ -41,16 +43,21 @@ class SbNetwork:
         self.weights[self.MOVE_BACKWARD, self.MOVE_BACKWARD] = 1
         self.weights[self.MOVE_STRAFE_LEFT, self.MOVE_STRAFE_LEFT] = 1
         self.weights[self.MOVE_STRAFE_RIGHT, self.MOVE_STRAFE_RIGHT] = 1
-        self.weights[self.ROTATE, self.ROTATE] = -1
-        self.weights[self.ROTATE, 11] = 1
-        self.weights[11, 11] = -1
-        self.weights[11, 12] = 1
+        # Deux chaînes de rotation indépendantes (mémoire de 2 pas)
+        # Gauche : ROTATE_LEFT -> 12 -> 13 -> ROTATE_LEFT
+        self.weights[self.ROTATE_LEFT, self.ROTATE_LEFT] = -1
+        self.weights[self.ROTATE_LEFT, 12] = 1
         self.weights[12, 12] = -1
         self.weights[12, 13] = 1
         self.weights[13, 13] = -1
-        self.weights[13, 14] = 1
+        self.weights[13, self.ROTATE_LEFT] = 1
+        # Droite : ROTATE_RIGHT -> 14 -> 15 -> ROTATE_RIGHT
+        self.weights[self.ROTATE_RIGHT, self.ROTATE_RIGHT] = -1
+        self.weights[self.ROTATE_RIGHT, 14] = 1
         self.weights[14, 14] = -1
-        self.weights[14, self.ROTATE] = 1
+        self.weights[14, 15] = 1
+        self.weights[15, 15] = -1
+        self.weights[15, self.ROTATE_RIGHT] = 1
 
         self.true_ids = list(range(self.num_nodes))
         self.next_historical_id = self.NEXT_HISTORICAL_ID_0
@@ -69,7 +76,7 @@ class SbNetwork:
                 self.states[self.MOUTH_MD2],
                 self.states[self.MOVE_FORWARD], self.states[self.MOVE_BACKWARD],
                 self.states[self.MOVE_STRAFE_LEFT], self.states[self.MOVE_STRAFE_RIGHT],
-                self.states[self.ROTATE])
+                self.states[self.ROTATE_LEFT], self.states[self.ROTATE_RIGHT])
 
     def mutation(self, pd, pi, wmax):
         if random.random() < pd:

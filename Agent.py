@@ -14,13 +14,17 @@ class Agent:
 
     # Plages des paramètres des yeux (tirés au hasard à la création)
     # Élargies pour inclure les valeurs d'origine (DISTANCE_VISION=70, VISION_ANGLE=30)
+    # Bornes par défaut (utilisées seulement si absentes de PARAMS)
     EYE_DISTANCE_MIN, EYE_DISTANCE_MAX = 1.0, 100.0
     EYE_ANGLE_MIN, EYE_ANGLE_MAX = 5.0, 60.0
     EYE_DIRECTION_MIN, EYE_DIRECTION_MAX = 0.0, 360.0
 
     def __init__(self, id_agent, x, y, energy, rotate_deg, env_width, env_height, cost_rotate, cost_move, cost_eat,
                  cost_neuron, cost_metabolism, consume_qty=100.0,
-                 max_cout_A=1.0, max_cout_B=1.0):
+                 max_cout_A=1.0, max_cout_B=1.0,
+                 eye_distance_min=1.0, eye_distance_max=100.0,
+                 eye_angle_min=5.0, eye_angle_max=60.0,
+                 eye_direction_min=0.0, eye_direction_max=360.0):
         self.id = id_agent
         self.x = x
         self.y = y
@@ -45,14 +49,20 @@ class Agent:
         self.step = 0
 
         # --- Paramètres des 3 yeux (tirés au hasard à la création) ---
-        # Chaque œil : (distance_px, angle_ouverture_deg, direction_relative_deg)
-        # distance : 1-50 px ; angle : 5-45° ; direction : 0-360° (relatif à l'axe de l'agent)
-        self.eyes = [
-            (random.uniform(self.EYE_DISTANCE_MIN, self.EYE_DISTANCE_MAX),
-             random.uniform(self.EYE_ANGLE_MIN, self.EYE_ANGLE_MAX),
-             random.uniform(self.EYE_DIRECTION_MIN, self.EYE_DIRECTION_MAX))
-            for _ in range(3)
-        ]
+        # Chaque œil : (distance_px, angle_ouverture_deg, direction_relative_deg, type, near_min)
+        # type : 0 = Agents, 1 = MD1, 2 = MD2 (l'œil ne détecte que ce type)
+        # near_min : distance minimale de vision (tirée entre EYE_DISTANCE_MIN et
+        #            distance_max) — rien n'est détecté entre l'agent et near_min,
+        #            ni au-delà de distance_max (évite de voir sa propre matière/agent)
+        self.eyes = []
+        for _ in range(3):
+            d_max = random.uniform(eye_distance_min, eye_distance_max)
+            d_min = random.uniform(eye_distance_min, d_max)
+            self.eyes.append((d_max,
+                              random.uniform(eye_angle_min, eye_angle_max),
+                              random.uniform(eye_direction_min, eye_direction_max),
+                              random.randint(0, 2),
+                              d_min))
 
         # Cout des actions
         self.cost_rotate = cost_rotate
@@ -63,29 +73,66 @@ class Agent:
         # Quantité de matière (MD1/MD2) consommée par tentative de bouche
         self.consume_qty = consume_qty
 
+    def init_random_sbn(self, connectivite):
+        """Génère un SBN aléatoire avec une connectivité moyenne fixée.
+
+        connectivite = nombre moyen d'arêtes sortantes par nœud.
+        Seuls les arcs ESSENTIELS sont fixes (auto-entretien des mouvements,
+        chaîne de rotation) ; tous les autres arcs sont tirés aléatoirement
+        avec des poids aléatoires. Chaque agent reçoit donc un réseau
+        réellement différent.
+        """
+        sbn = SbNetwork()
+        n = sbn.num_nodes
+
+        # Arcs essentiels (toujours présents, poids varié)
+        essential_arcs = set()
+        for mv in (sbn.MOVE_FORWARD, sbn.MOVE_BACKWARD, sbn.MOVE_STRAFE_LEFT, sbn.MOVE_STRAFE_RIGHT):
+            essential_arcs.add((mv, mv))
+        # Deux chaînes de rotation (gauche : 12-13, droite : 14-15)
+        for a, b in ((sbn.ROTATE_LEFT, 12), (12, 12), (12, 13), (13, 13), (13, sbn.ROTATE_LEFT),
+                     (sbn.ROTATE_RIGHT, 14), (14, 14), (14, 15), (15, 15), (15, sbn.ROTATE_RIGHT)):
+            essential_arcs.add((a, b))
+
+        # Le reste des arcs est tiré aléatoirement
+        total_arcs = int(round(connectivite * n))
+        n_random = max(0, total_arcs - len(essential_arcs))
+        candidates = [(i, j) for i in range(n) for j in range(n)
+                      if (i, j) not in essential_arcs]
+        random.shuffle(candidates)
+        random_arcs = set(candidates[:n_random])
+
+        # Poids aléatoires pour TOUS les arcs (y compris essentiels)
+        all_arcs = essential_arcs | random_arcs
+        for i in range(n):
+            for j in range(n):
+                if (i, j) in all_arcs:
+                    sbn.weights[i, j] = random.choice([-5, -3, -1, 1, 3, 5])
+                else:
+                    sbn.weights[i, j] = 0
+        self.sbn = sbn
+
     # ------------------------------------------------------------------
     # Mutation exponentielle des paramètres des yeux
     # ------------------------------------------------------------------
-    def mutate_eyes(self, pd_eye):
+    def mutate_eyes(self, pd_eye, lam_dist=10.0, lam_angle=10.0, lam_dir=60.0):
         """Mutation exponentielle des paramètres des yeux lors de la division.
 
         Loi exponentielle : nouvelle_valeur = parent + expovariate(1/lambda)
-        où lambda est proportionnel à la plage du paramètre. Resultat : une
-        valeur proche du parent est probable, mais une valeur très différente
-        est possible (queue exponentielle). Clamp aux bornes.
+        où lambda = échelle de la loi (paramétrable). Résultat : une valeur
+        proche du parent est probable, mais une valeur très différente est
+        possible (queue exponentielle). Clamp aux bornes.
         """
         for i in range(3):
-            dist, angle, direction = self.eyes[i]
+            dist, angle, direction, eye_type, near_min = self.eyes[i]
             if random.random() < pd_eye:
-                # Mutation de la distance (plage 1-50, lambda = 10)
-                dist = self._exp_mutate(dist, self.EYE_DISTANCE_MIN, self.EYE_DISTANCE_MAX, lam=10.0)
+                dist = self._exp_mutate(dist, self.EYE_DISTANCE_MIN, self.EYE_DISTANCE_MAX, lam=lam_dist)
+                near_min = random.uniform(self.EYE_DISTANCE_MIN, dist)
             if random.random() < pd_eye:
-                # Mutation de l'angle (plage 5-45, lambda = 10)
-                angle = self._exp_mutate(angle, self.EYE_ANGLE_MIN, self.EYE_ANGLE_MAX, lam=10.0)
+                angle = self._exp_mutate(angle, self.EYE_ANGLE_MIN, self.EYE_ANGLE_MAX, lam=lam_angle)
             if random.random() < pd_eye:
-                # Mutation de la direction (plage 0-360, lambda = 60)
-                direction = self._exp_mutate(direction, self.EYE_DIRECTION_MIN, self.EYE_DIRECTION_MAX, lam=60.0)
-            self.eyes[i] = (dist, angle, direction)
+                direction = self._exp_mutate(direction, self.EYE_DIRECTION_MIN, self.EYE_DIRECTION_MAX, lam=lam_dir)
+            self.eyes[i] = (dist, angle, direction, eye_type, near_min)
 
     @staticmethod
     def _exp_mutate(value, vmin, vmax, lam):
@@ -178,6 +225,14 @@ class Agent:
         self.angle += self.rotate_deg
         self.angle %= 360
 
+    def rotate_left(self):
+        self.angle -= 5.0  # rotation à gauche de 5°
+        self.angle %= 360
+
+    def rotate_right(self):
+        self.angle += 5.0  # rotation à droite de 5°
+        self.angle %= 360
+
     def eat(self, victim):
         """Mange un autre agent : transfère son énergie."""
         victim.alive = False
@@ -203,7 +258,8 @@ class Agent:
             field.add_deposit(self.x, self.y, self.energy)
             self.energy = 0
 
-    def division(self, id_agent, vision_angle, pd, pi, wmax, pd_eye, iteration):
+    def division(self, id_agent, vision_angle, pd, pi, wmax, pd_eye, iteration,
+                 lam_dist=10.0, lam_angle=10.0, lam_dir=60.0):
         # On calcule un angle sûr dans la zone aveugle du parent
         angle_enfant = (self.angle + random.uniform(vision_angle,
                                                     360 - vision_angle)) % 360
@@ -232,7 +288,7 @@ class Agent:
         # Mutation du cerveau
         enfant.sbn.mutation(pd, pi, wmax)
         # Mutation exponentielle des paramètres des yeux
-        enfant.mutate_eyes(pd_eye)
+        enfant.mutate_eyes(pd_eye, lam_dist, lam_angle, lam_dir)
 
         return enfant
 
@@ -254,7 +310,7 @@ class Agent:
         (action_eat, action_eat_md1, action_eat_md2,
          action_move_fwd, action_move_back,
          action_move_left, action_move_right,
-         action_rotate) = self.sbn.step(yeux)
+         action_rotate_left, action_rotate_right) = self.sbn.step(yeux)
 
         # On retire pour chaque neurone activé son coût
         value_cost_neuron = float(np.sum(self.sbn.states)) * self.calculer_contrainte()
@@ -264,8 +320,13 @@ class Agent:
         env_cl = getattr(self, 'env_cl', None)
 
         # On effectue chaque action en vérifiant l'énergie et en la diminuant en fonction
-        if action_rotate and self.energy >= self.cost_rotate:
-            self.rotate()
+        # Rotation : ROTATE_LEFT et ROTATE_RIGHT (5° chacun, même coût)
+        if action_rotate_left and self.energy >= self.cost_rotate:
+            self.rotate_left()
+            self.energy -= self.cost_rotate
+            lost_energy += self.cost_rotate
+        if action_rotate_right and self.energy >= self.cost_rotate:
+            self.rotate_right()
             self.energy -= self.cost_rotate
             lost_energy += self.cost_rotate
         # Les 4 mouvements : même coût COST_MOVE
@@ -332,21 +393,27 @@ class Agent:
         eye_hits = [0, 0, 0]
 
         # --- Détection de la matière MD1/MD2 (échantillonnage dans chaque cône d'œil) ---
+        # Un œil de type MD1 ne détecte que MD1, type MD2 que MD2, type Agents rien
         if field is not None:
             gx, gy = self.x, self.y
             fdx = field.dx
             nrows, ncols = field.MD1.shape
-            for idx, (dist_eye, angle_eye, direction_eye) in enumerate(self.eyes):
+            for idx, eye in enumerate(self.eyes):
+                dist_eye, angle_eye, direction_eye, eye_type, near_min = eye
+                if eye_type == 0:
+                    continue  # Œil Agents : ne détecte pas la matière
                 angle_regard = math.radians(self.angle + direction_eye)
-                # Échantillonner 5 points le long du rayon de l'œil
                 found = False
                 for frac in (0.3, 0.5, 0.7, 0.9, 1.0):
                     d = dist_eye * frac
+                    if d < near_min:
+                        continue  # Trop près (near_min) — ignore sa propre case
                     # Conversion px -> grille (indexé [row=y, col=x])
                     sy = int((gy + d * math.sin(angle_regard)) / fdx)
                     sx = int((gx + d * math.cos(angle_regard)) / fdx)
                     if 0 <= sy < nrows and 0 <= sx < ncols:
-                        if field.MD1[sy, sx] > 0.5 or field.MD2[sy, sx] > 0.5:
+                        mat = field.MD1[sy, sx] if eye_type == 1 else field.MD2[sy, sx]
+                        if mat > 0.5:
                             found = True
                             break
                 if found:
@@ -368,11 +435,15 @@ class Agent:
             elif dy < -self.env_height / 2:
                 dy += self.env_height
             dist_sq = dx * dx + dy * dy
-
             angle_cible = math.atan2(dy, dx)
-            for idx, (dist_eye, angle_eye, direction_eye) in enumerate(self.eyes):
-                if dist_eye * dist_eye >= dist_sq:
+            for idx, eye in enumerate(self.eyes):
+                dist_eye, angle_eye, direction_eye, eye_type, near_min = eye
+                # Œil de type Agents : ne détecte que les agents (pas la matière)
+                # Vision bornée : rien entre l'agent et near_min, rien après dist_eye
+                if eye_type != 0:
                     continue
+                if dist_sq < near_min * near_min or dist_sq >= dist_eye * dist_eye:
+                    continue  # Trop près (near_min) ou trop loin pour cet œil
                 angle_regard = math.radians(self.angle + direction_eye)
                 angle_vision_rad = math.radians(angle_eye)
                 diff = (angle_cible - angle_regard + math.pi) % (2 * math.pi) - math.pi
@@ -393,18 +464,25 @@ class Agent:
         # On récupère la position de l'agent
         pos = (int(self.x),
                int(self.y + offset_y))
-        # Affichage du cercle coloré
+        # Affichage du triangle isocèle orienté (sens backward -> forward)
+        # Longueur = 1.5 × diamètre, largeur = 0.8 × diamètre
         ratio = max(0, min(self.energy / max_energy, 1))
         color = (int(255 * (1 - ratio)), int(255 * ratio), 0)
         if tracking:
-            # Halo de ciblage (cercle vide plus grand)
-            pygame.draw.circle(screen, (255, 255, 255), pos, size + 10, 2)
-
-        pygame.draw.circle(screen, color, pos, size)
+            # Halo de ciblage (triangle vide plus grand)
+            L = 1.5 * 2 * size
+            W = 0.8 * 2 * size
+            pts_tri = self._triangle_points(self.x, self.y + offset_y, self.angle, L, W, 1.6)
+            pygame.draw.polygon(screen, (255, 255, 255), pts_tri, 2)
+        L = 1.5 * 2 * size          # longueur totale (backward -> forward)
+        W = 0.8 * 2 * size          # largeur à la base
+        pts_tri = self._triangle_points(self.x, self.y + offset_y, self.angle, L, W)
+        pygame.draw.polygon(screen, color, pts_tri)
+        pygame.draw.polygon(screen, (20, 20, 25), pts_tri, 1)
 
         if vision_cone:
             # Affichage des 3 cônes de vision (un par œil)
-            for dist_eye, angle_eye, direction_eye in self.eyes:
+            for dist_eye, angle_eye, direction_eye, _type, _near_min in self.eyes:
                 left_rad = math.radians(self.angle + direction_eye - angle_eye)
                 right_rad = math.radians(self.angle + direction_eye + angle_eye)
 
@@ -415,6 +493,26 @@ class Agent:
 
                 cone_color = (255, 0, 0, 40) if self.vision_input == 1 else (255, 255, 255, 20)
                 pygame.draw.polygon(overlay, cone_color, [pos, p_left, p_right])
+
+    @staticmethod
+    def _triangle_points(x, y, angle_deg, length, width, scale=1.0):
+        """Points d'un triangle isocèle centré sur (x, y), pointe vers angle_deg.
+        length = longueur totale (base -> pointe), width = largeur de la base.
+        Le centre de gravité du triangle est sur (x, y) : base à L/6 derrière,
+        pointe à 2L/3 devant."""
+        rad = math.radians(angle_deg)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        L = length * scale
+        W = width * scale
+        # Pointe (avant)
+        tip = (x + (2 * L / 3) * cos_a, y + (2 * L / 3) * sin_a)
+        # Base (arrière) : centre de base à L/6 derrière, points à ±W/2 perpendiculaires
+        bx = x - (L / 6) * cos_a
+        by = y - (L / 6) * sin_a
+        perp_x, perp_y = -sin_a * (W / 2), cos_a * (W / 2)
+        base_l = (bx + perp_x, by + perp_y)
+        base_r = (bx - perp_x, by - perp_y)
+        return [tip, base_r, base_l]
 
     def calculer_contrainte(self):
         gradient_A = (self.x / self.env_width) * self.max_cout_A
