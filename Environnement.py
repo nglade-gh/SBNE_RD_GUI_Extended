@@ -80,6 +80,7 @@ TOP_BAR_HEIGHT = 60
 LEFT_PANEL_WIDTH = 300
 RIGHT_PANEL_WIDTH = 340
 CONSOLE_HEIGHT = 150
+COLOR_SCALE_WIDTH = 80  # zone des color scales MD1/MD2 (à droite de l'environnement)
 
 # ============================================================================
 # COULEURS GUI
@@ -319,6 +320,10 @@ class Simulation:
         self.font_title = pygame.font.SysFont("Arial", 16, bold=True)
         self.font_small = pygame.font.SysFont("Arial", 12)
         self.font_tiny = pygame.font.SysFont("Arial", 10)
+        self.font_scale = pygame.font.SysFont("Arial", 9)  # color scales + légendes (créée 1 fois)
+        self.font_id = pygame.font.SysFont("Arial", 13)
+        self.font_big = pygame.font.SysFont("Arial", 20, bold=True)
+        self.font_creature_num = pygame.font.SysFont("Arial", 18, bold=True)
         self.tracked_agent = None
         self.selected_agents = []  # [agent_id, ...]
         # Activité des organes : historique par agent sélectionné (depuis sa sélection)
@@ -460,11 +465,19 @@ class Simulation:
     # ------------------------------------------------------------------
     def _layout(self):
         lw = self.left_panel_width
+        cs = COLOR_SCALE_WIDTH
+        # Environnement de simulation + color scales à droite
+        env_w = max(200, self.win_width - lw - RIGHT_PANEL_WIDTH)
         self.world_offset_x = lw
         self.world_rect = pygame.Rect(lw, TOP_BAR_HEIGHT + DASHBOARD_SIZE,
-                                     max(200, self.win_width - lw - RIGHT_PANEL_WIDTH), self.height)
-        # Panneau gauche
-        self.left_panel.update_rect(0, TOP_BAR_HEIGHT + DASHBOARD_SIZE, lw, self.height)
+                                     max(100, env_w - cs), self.height)
+        # Zone des color scales (entre environnement et panneau droit)
+        self.scale_rect = pygame.Rect(lw + max(100, env_w - cs),
+                                      TOP_BAR_HEIGHT + DASHBOARD_SIZE,
+                                      cs, self.height)
+        # Panneau gauche : descend jusqu'en bas
+        self.left_panel.update_rect(0, TOP_BAR_HEIGHT + DASHBOARD_SIZE, lw,
+                                    self.win_height - TOP_BAR_HEIGHT - DASHBOARD_SIZE)
         # Barre de contrôle
         btn_h = 36
         btn_y = TOP_BAR_HEIGHT + 8
@@ -474,12 +487,12 @@ class Simulation:
         self.btn_stop.set_position((self.win_width - RIGHT_PANEL_WIDTH - 50, btn_y))
         self.slider_refresh.set_position((170, btn_y))
         self.label_refresh.set_position((320, btn_y))
-        # Panneau droit : les 2 onglets (CERVEAUX / STATISTIQUES) occupent toute
-        # la hauteur du panneau droit (plus de stats_panel séparé).
+        # Panneau droit : descend jusqu'en bas
         self.right_tab_rects = {}  # repositionné à chaque rendu
-        # Console
-        self.console.rect.update(0, TOP_BAR_HEIGHT + DASHBOARD_SIZE + self.height,
-                                self.win_width, CONSOLE_HEIGHT)
+        # Console : même largeur que l'environnement, décalée à droite du panneau gauche
+        console_w = env_w
+        self.console.rect.update(lw, TOP_BAR_HEIGHT + DASHBOARD_SIZE + self.height,
+                                console_w, CONSOLE_HEIGHT)
 
     def _init_population(self):
         """Initializes the agent population."""
@@ -1128,6 +1141,9 @@ class Simulation:
         world_scaled = pygame.transform.smoothscale(world_surface, self.world_rect.size)
         self.screen.blit(world_scaled, self.world_rect.topleft)
 
+        # --- Color scales MD1 / MD2 (min en haut, max en bas) ---
+        self._draw_color_scales()
+
         # Cases vertes du panneau gauche = agents actuellement sélectionnés
         self.left_panel.update_selected(self.selected_agents)
 
@@ -1220,7 +1236,7 @@ class Simulation:
         """Panneau droit à 3 onglets : BRAIN, CREATURE, STATISTICS."""
         panel_x = self.win_width - RIGHT_PANEL_WIDTH
         panel_y = TOP_BAR_HEIGHT
-        panel_h = TOP_BAR_HEIGHT + DASHBOARD_SIZE + self.height - panel_y
+        panel_h = self.win_height - panel_y  # descend jusqu'en bas
         content_top = panel_y + 30  # sous la barre d'onglets
         content_h = panel_y + panel_h - content_top
 
@@ -1257,7 +1273,7 @@ class Simulation:
 
         # Liste des agents sélectionnés (numéros ; l'affiché en ROUGE)
         ids = [str(i) for i in self.selected_agents]
-        font_id = pygame.font.SysFont("Arial", 13)
+        font_id = self.font_id
         widths = [font_id.size(t)[0] for t in ids] or [0]
         gap = 10
         total_w = sum(widths) + gap * max(0, len(ids) - 1)
@@ -1277,7 +1293,7 @@ class Simulation:
         else:
             displayed = None
         num_txt = str(displayed) if displayed is not None else "-"
-        font_big = pygame.font.SysFont("Arial", 20, bold=True)
+        font_big = self.font_big
         tw = font_big.size(num_txt)[0]
         nx = panel_x + (RIGHT_PANEL_WIDTH - tw) // 2
         ny = y_list_end + 4
@@ -1337,7 +1353,7 @@ class Simulation:
         nav_y = top
         # --- Navigation : liste agents sélectionnés + prev/next ---
         ids = [str(i) for i in self.selected_agents]
-        font_id = pygame.font.SysFont("Arial", 13)
+        font_id = self.font_id
         gap = 10
         x = panel_x + 10
         for i, t in enumerate(ids):
@@ -1353,7 +1369,7 @@ class Simulation:
             displayed = None
 
         num_txt = str(displayed) if displayed is not None else "-"
-        font_big = pygame.font.SysFont("Arial", 18, bold=True)
+        font_big = self.font_creature_num
         nx = panel_x + (RIGHT_PANEL_WIDTH - font_big.size(num_txt)[0]) // 2
         prev1 = pygame.Rect(nx - 22, nav_y, 14, 14)
         next1 = pygame.Rect(nx + font_big.size(num_txt)[0] + 6, nav_y, 14, 14)
@@ -1478,7 +1494,7 @@ class Simulation:
                     pygame.draw.circle(self.screen, organ_colors[k], (px, int(py)), 2)
 
         # Axe temps (abscisse)
-        font_ax = pygame.font.SysFont("Arial", 9)
+        font_ax = self.font_scale
         surf = font_ax.render(f"t={t0}", True, COLOR_TEXT_DIM)
         self.screen.blit(surf, (x + label_w, y + h - 12))
         surf = font_ax.render(f"t={t0 + t_max}", True, COLOR_TEXT_DIM)
@@ -1554,7 +1570,7 @@ class Simulation:
                                 plus_rect.centery - surf.get_height() // 2))
         self.stats_nav_rects["plus"] = plus_rect
 
-        plot_top = ctrl_y + btn_h + 4
+        plot_top = ctrl_y + btn_h + 34  # +34 : place pour les 2 lignes de légende min/max
         plot_h = h - (plot_top - y) - 14
         if plot_h < 20:
             return
@@ -1593,29 +1609,84 @@ class Simulation:
         for frac in (0.25, 0.5, 0.75):
             gy = plot_top + int(plot_h * frac)
             pygame.draw.line(self.screen, (35, 45, 60), (x + 4, gy), (x + w - 4, gy), 1)
-        # Courbes
+        # Courbes (un seul appel draw.lines par série)
         for name, pts, color, _, _ in series:
-            px_prev = py_prev = None
+            if len(pts) < 2:
+                continue
+            coords = []
             for t, v in pts:
                 px = x + 4 + int((t - t0) / dt * (w - 8))
                 py = plot_top + plot_h - int(v * (plot_h - 4)) - 2
-                if px_prev is not None:
-                    pygame.draw.line(self.screen, color, (px_prev, py_prev), (px, py), 1)
-                px_prev, py_prev = px, py
-        # Min/Max au-dessus du graphique (sous le selecteur), code couleur
-        font_leg = pygame.font.SysFont("Arial", 9)
-        my = plot_top - 11
-        lx = x + 4
+                coords.append((px, py))
+            pygame.draw.lines(self.screen, color, False, coords, 1)
+        # Min/Max au-dessus du graphique (sous le selecteur), 2 lignes, code couleur
+        font_leg = self.font_scale
+        my = plot_top - 26
+        items = []
         for name, _, color, lo, hi in series:
             lbl = f"{name}: {lo:.0f}–{hi:.0f}"
             surf = font_leg.render(lbl, True, color)
-            self.screen.blit(surf, (lx, my))
-            lx += surf.get_width() + 10
+            items.append((surf, color))
+        half = (len(items) + 1) // 2
+        for row in range(2):
+            lx = x + 4
+            for surf, color in items[row * half:(row + 1) * half]:
+                self.screen.blit(surf, (lx, my + row * 11))
+                lx += surf.get_width() + 10
         # Axe temps
         surf = font_leg.render(f"t={t0}", True, COLOR_TEXT_DIM)
         self.screen.blit(surf, (x + 4, plot_top + plot_h - 12))
         surf = font_leg.render(f"t={t1}", True, COLOR_TEXT_DIM)
         self.screen.blit(surf, (x + w - 4 - surf.get_width(), plot_top + plot_h - 12))
+
+    def _draw_color_scales(self):
+        """Color scales MD1 (vert, moitié haute) et MD2 (rouge, moitié basse),
+        chacune avec un gradient VERTICAL (max en haut, min en bas) et les
+        valeurs min/max affichées. Le gradient est pré-rendu (cache) : seuls
+        les textes min/max sont redessinés à chaque frame."""
+        r = self.scale_rect
+        if r.w < 20 or r.h < 60:
+            return
+        if not hasattr(self, 'field') or self.field is None:
+            return
+        font = self.font_scale
+        # Deux barres verticales empilées : MD1 en haut, MD2 en bas
+        for i, (mat, label, color) in enumerate((
+                (self.field.MD1, "MD1", (60, 220, 90)),
+                (self.field.MD2, "MD2", (220, 60, 60)))):
+            zone_top = r.y + i * (r.h // 2)
+            zone_h = r.h // 2
+            surf_lbl = font.render(label, True, color)
+            self.screen.blit(surf_lbl, (r.x + 4, zone_top + 2))
+            bar_w = max(12, r.w - 40)
+            bar_x = r.x + 4
+            bar_y = zone_top + 18
+            bar_h = max(10, zone_h - 44)
+            # Gradient pré-rendu (cache) puis blit
+            grad = self._scale_gradient(color, bar_w, bar_h)
+            self.screen.blit(grad, (bar_x, bar_y))
+            pygame.draw.rect(self.screen, COLOR_BORDER, (bar_x, bar_y, bar_w, bar_h), 1)
+            vmax = float(mat.max()) if mat.size else 0.0
+            vmin = float(mat.min()) if mat.size else 0.0
+            surf_max = font.render(f"{vmax:.0f}", True, COLOR_TEXT)
+            self.screen.blit(surf_max, (bar_x + bar_w + 3, bar_y - 2))
+            surf_min = font.render(f"{vmin:.0f}", True, COLOR_TEXT_DIM)
+            self.screen.blit(surf_min, (bar_x + bar_w + 3, bar_y + bar_h - 10))
+
+    def _scale_gradient(self, color, w, h):
+        """Gradient vertical pré-rendu (cache par couleur/taille)."""
+        key = (color, w, h)
+        cache = getattr(self, '_scale_grad_cache', None)
+        if cache is None:
+            cache = self._scale_grad_cache = {}
+        if key not in cache:
+            surf = pygame.Surface((w, h))
+            for k in range(h):
+                frac = 1.0 - k / max(h - 1, 1)  # 1 en haut (max), 0 en bas (min)
+                surf.fill(tuple(int(col * (0.15 + 0.85 * frac)) for col in color),
+                          (0, k, w, 1))
+            cache[key] = surf
+        return cache[key]
 
     @staticmethod
     def _draw_arrow(screen, x1, y1, x2, y2, color, width=1):
