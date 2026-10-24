@@ -94,6 +94,9 @@ class SbNetwork:
         self.weights[entry_node, exit_node] += random.randint(-1, 1)
 
     def insertion(self, wmax):
+        # wmax peut arriver en float (VALEUR_MAX_POIDS via PARAMS/explorateur) —
+        # randint exige des entiers (2026-10-24).
+        wmax = max(0, int(wmax))
         n = self.num_nodes
         self.states = np.append(self.states, random.randint(0, 1))
         new_weights = np.zeros((n + 1, n + 1), dtype=int)

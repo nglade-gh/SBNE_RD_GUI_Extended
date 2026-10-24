@@ -344,6 +344,25 @@ class LeftPanelTree:
     # Nombre max d'agents affichés dans le panneau (évite un contenu trop long)
     _MAX_AGENTS_DISPLAY = 40
 
+    def _bc_heights(self):
+        """Hauteurs réelles des blocs de CL, miroir exact de _draw_params.
+        G4 (2026-10-24) : l'ancienne estimation supposait TOUJOURS la ligne de
+        valeur Dirichlet ET la ligne de paroi pour chaque bord → sur-estimation
+        permanente du contenu (zone morte en fin de scroll)."""
+        row_h = 20
+        matter_h = 0
+        for side_key in ("LEFT", "RIGHT", "TOP", "BOTTOM"):
+            matter_h += row_h + 2 * row_h + 2  # label + boutons MD1/MD2 + espacement
+            for matter in ("MD1", "MD2"):
+                if self.params.get(f"CL_{matter}_{side_key}", "TORIC") == "DIRICHLET":
+                    matter_h += row_h  # ligne de valeur Dirichlet (présente uniquement si Dirichlet)
+        agents_h = 0
+        for side_key in ("LEFT", "RIGHT", "TOP", "BOTTOM"):
+            agents_h += row_h + row_h + 2  # label + bouton + espacement
+            if self._agents_cl.get(side_key, "TORIC") == "SOLID":
+                agents_h += row_h  # ligne paroi (présente uniquement si SOLID)
+        return matter_h, agents_h
+
     def _content_height(self):
         """Hauteur de contenu selon l'onglet actif."""
         row_h = 20
@@ -359,13 +378,14 @@ class LeftPanelTree:
             h += 22 + 2  # header
             if not self.param_groups_expanded[group_name]:
                 continue
+            # Compter seulement les clés présentes dans PARAMS : le rendu saute les
+            # clés absentes SANS avancer y (miroir exact de _draw_params).
+            n_keys = sum(1 for k in keys if self.params.get(k) is not None)
             if group_name == "Environment":
-                h += row_h * len(keys) + 4
-                # Matter BC: 4 sides x (label + 2 MD1/MD2 buttons + optional Dirichlet value)
-                # Agent BC: 4 sides x (label + 1 button + optional wall)
-                h += 4 * (row_h + 2 * row_h + row_h + 2) + 4 * (row_h + row_h + row_h + 2)
+                h += row_h * n_keys + 4
+                h += sum(self._bc_heights())
             else:
-                h += row_h * len(keys) + 4
+                h += row_h * n_keys + 4
         return h
 
     # ------------------------------------------------------------------
@@ -450,24 +470,20 @@ class LeftPanelTree:
                     self.param_groups_expanded[gname] = not self.param_groups_expanded[gname]
                     # Ajuste le scroll pour rendre le contenu visible
                     if self.param_groups_expanded[gname]:
-                        contenu = {"Simulation": 20 * max(1, len(self.params)) + 4,
-                                   "Agents": 18 * min(len(self.sections["Agents"]["items"]), self._MAX_AGENTS_DISPLAY) + 18,
+                        # G4 (2026-10-24) : mêmes formules que _content_height. L'ancienne
+                        # estimation utilisait len(self.params) (le PARAMS global, ~40 clés)
+                        # pour « Simulation », la hauteur de la LISTE d'agents pour le groupe
+                        # « Agents », et des hauteurs de blocs CL figées — décalage de
+                        # plusieurs centaines de px dans le positionnement du scroll.
+                        contenu = {"Simulation": 20 * len(self.param_groups["Simulation"]) + 4,
+                                   "Agents": 20 * len(self.param_groups["Agents"]) + 4,
                                    "Evolution": 20 * len(self.param_groups["Evolution"]) + 4,
-                                   "Environment": 24 + 4 * 4 * 22 + 20}[gname]
+                                   "Environment": 20 * len(self.param_groups["Environment"]) + 4 + sum(self._bc_heights())}[gname]
                         visible_h = self.rect.h - 56
                         cible = rect.y + contenu - visible_h + 54
-                        # Recalcule scroll_max en supposant la section dépliée
-                        h = 0
-                        for nm in ("Simulation", "Agents", "Evolution", "Environment"):
-                            h += 22 + 2
-                            if not (self.param_groups_expanded[nm] or nm == gname):
-                                continue
-                            if nm == "Environment":
-                                h += 20 * len(self.param_groups["Environment"]) + 4
-                                h += 4 * (20 + 2*20 + 20 + 2) + 4 * (20 + 20 + 20 + 2)
-                            else:
-                                h += 20 * len(self.param_groups[nm]) + 4
-                        self.scroll_max = max(0, h - visible_h)
+                        # L'état param_groups_expanded vient d'être basculé : _content_height()
+                        # renvoie directement la hauteur post-ouverture (plus de duplication).
+                        self.scroll_max = max(0, self._content_height() - visible_h)
                         self.scroll_y = min(self.scroll_max, max(0, cible))
                     return True
             # CL matière / agents : boutons cyclables
@@ -495,11 +511,6 @@ class LeftPanelTree:
             for agent_id, rect, _ in self.agent_checkboxes:
                 if rect.collidepoint(event.pos):
                     return ("agent_toggle", agent_id)
-            # Boundary condition buttons (Environment section)
-            for (side_key, matter), rect in self.cl_buttons.items():
-                if rect.collidepoint(event.pos):
-                    self._cycle_cl(side_key, matter)
-                    return True
 
         return False
 
@@ -591,8 +602,18 @@ class LeftPanelTree:
         y = self.rect.y + 54 - self.scroll_y
 
         if self.active_tab == 'params':
+            self.agent_checkboxes = []  # vider la zone de l'autre onglet (G1)
             y = self._draw_params(screen, y)
         else:
+            # G1 (2026-10-24) : vider les zones cliquables de l'onglet Parameters.
+            # Sinon les anciens Rects (headers de groupe, valeurs, boutons CL) restent
+            # enregistrés et, le handler les testant AVANT les checkboxes, ils volent
+            # les clics posés sur la liste des agents (ex. cliquer sur Agent #0 repliait
+            # le groupe « Simulation »).
+            self.section_headers = {}
+            self.param_value_rects = {}
+            self.cl_buttons = {}
+            self.wall_buttons = {}
             y = self._draw_agents(screen, y)
 
         screen.set_clip(None)
@@ -609,20 +630,6 @@ class LeftPanelTree:
             pygame.draw.rect(screen, color, self.scrollbar_rect, border_radius=3)
         else:
             self.scrollbar_rect = None
-
-    def _draw_section_header(self, screen, name, y):
-        header_h = 24
-        rect = pygame.Rect(self.rect.x + 4, y, self.rect.w - 8, header_h)
-        self.section_headers[name] = rect
-        if rect.bottom < self.rect.y + 24 or rect.top > self.rect.bottom - 4:
-            return y + header_h + 4
-        expanded = self.sections[name]["expanded"]
-        color = COLOR_BG_HEADER if expanded else (20, 25, 35)
-        pygame.draw.rect(screen, color, rect, border_radius=3)
-        arrow = "▼" if expanded else "►"
-        screen.blit(self.font.render(arrow, True, COLOR_TEXT_DIM), (self.rect.x + 10, y + 4))
-        screen.blit(self.font.render(name, True, COLOR_TEXT), (self.rect.x + 28, y + 4))
-        return y + header_h + 4
 
     def _draw_params(self, screen, y):
         """Parameters tab: collapsible sub-sections (Simulation / Agents /
@@ -716,72 +723,72 @@ class LeftPanelTree:
         y += 4
 
         # CL matière : 4 bords × (MD1, MD2) avec type + valeur Dirichlet
+        # G4 (2026-10-24) : l'ancien garde d'écran faisait `continue` sur TOUT le bord
+        # quand le label était hors écran — les boutons MD1/MD2 (et leurs lignes de
+        # valeur) pouvaient alors être invisibles bien qu'entrant dans la zone visible,
+        # et le curseur y perdait leurs hauteurs. Chaque ligne avance désormais y
+        # exactement une fois ; seul le dessin est conditionnel (les rects cliquables
+        # ne sont toujours enregistrés que si la ligne est dessinée).
         sides = [("X - Gauche", "LEFT"), ("X - Droite", "RIGHT"), ("Y - Haut", "TOP"), ("Y - Bas", "BOTTOM")]
         for label, side_key in sides:
-            if y + row_h < self.rect.y + 54 or y > self.rect.bottom:
-                y += row_h
-                continue
-            screen.blit(self.font.render(label, True, COLOR_TEXT), (self.rect.x + 18, y + 3))
+            if self.rect.y + 54 <= y + row_h and y <= self.rect.bottom:
+                screen.blit(self.font.render(label, True, COLOR_TEXT), (self.rect.x + 18, y + 3))
             y += row_h
             for matter in ("MD1", "MD2"):
-                if y + row_h < self.rect.y + 54 or y > self.rect.bottom:
-                    y += row_h
-                    continue
                 cur = self._get_cl(side_key, matter)
-                # Bouton de cycle (Torique/Neumann/Dirichlet)
-                btn_rect = pygame.Rect(self.rect.x + 18, y, 110, row_h)
-                color = COLOR_BUTTON_HOVER if btn_rect.collidepoint(pygame.mouse.get_pos()) else COLOR_BG_HEADER
-                pygame.draw.rect(screen, color, btn_rect, border_radius=3)
-                screen.blit(self.font_small.render(f"{matter}: {cur}", True, COLOR_TEXT), (btn_rect.x + 4, y + 4))
-                self.cl_buttons[(side_key, matter)] = btn_rect
+                if self.rect.y + 54 <= y + row_h and y <= self.rect.bottom:
+                    # Bouton de cycle (Torique/Neumann/Dirichlet)
+                    btn_rect = pygame.Rect(self.rect.x + 18, y, 110, row_h)
+                    color = COLOR_BUTTON_HOVER if btn_rect.collidepoint(pygame.mouse.get_pos()) else COLOR_BG_HEADER
+                    pygame.draw.rect(screen, color, btn_rect, border_radius=3)
+                    screen.blit(self.font_small.render(f"{matter}: {cur}", True, COLOR_TEXT), (btn_rect.x + 4, y + 4))
+                    self.cl_buttons[(side_key, matter)] = btn_rect
                 y += row_h
                 # Si Dirichlet : champ de valeur éditable
                 if cur == "DIRICHLET":
-                    if y + row_h < self.rect.y + 54 or y > self.rect.bottom:
-                        y += row_h
-                        continue
-                    val_key = f"CL_DIRICHLET_{side_key}_{matter}"
-                    screen.blit(self.font_small.render(f"val {matter}:", True, COLOR_TEXT_DIM), (self.rect.x + 30, y + 4))
-                    # Valeur justifiée à DROITE
-                    txt_v = str(self.params.get(val_key, 0.0))
-                    val_wv = self.font_small.size(txt_v)[0]
-                    val_rect = pygame.Rect(self.rect.x + self.rect.w - val_wv - 12, y, val_wv + 12, row_h)
-                    if self.editing_key == val_key:
-                        pygame.draw.rect(screen, (30, 40, 60), val_rect, border_radius=3)
-                        txt = self.editing_text + "|"
-                        color = COLOR_GREEN
-                    else:
-                        txt = str(self.params.get(val_key, 0.0))
-                        color = COLOR_TEXT
-                        if val_rect.collidepoint(pygame.mouse.get_pos()):
-                            pygame.draw.rect(screen, (30, 38, 55), val_rect, border_radius=3)
-                    screen.blit(self.font_small.render(txt, True, color), (val_rect.x + 6, y + 4))
-                    self.param_value_rects[val_key] = val_rect
+                    if self.rect.y + 54 <= y + row_h and y <= self.rect.bottom:
+                        val_key = f"CL_DIRICHLET_{side_key}_{matter}"
+                        screen.blit(self.font_small.render(f"val {matter}:", True, COLOR_TEXT_DIM), (self.rect.x + 30, y + 4))
+                        # Valeur justifiée à DROITE
+                        txt_v = str(self.params.get(val_key, 0.0))
+                        val_wv = self.font_small.size(txt_v)[0]
+                        val_rect = pygame.Rect(self.rect.x + self.rect.w - val_wv - 12, y, val_wv + 12, row_h)
+                        if self.editing_key == val_key:
+                            pygame.draw.rect(screen, (30, 40, 60), val_rect, border_radius=3)
+                            txt = self.editing_text + "|"
+                            color = COLOR_GREEN
+                        else:
+                            txt = str(self.params.get(val_key, 0.0))
+                            color = COLOR_TEXT
+                            if val_rect.collidepoint(pygame.mouse.get_pos()):
+                                pygame.draw.rect(screen, (30, 38, 55), val_rect, border_radius=3)
+                        screen.blit(self.font_small.render(txt, True, color), (val_rect.x + 6, y + 4))
+                        self.param_value_rects[val_key] = val_rect
                     y += row_h
             y += 2
 
         # Agent BC: 4 sides x (TORIC/SOLID + AGENT_STOP/AGENT_REBOUNCE)
         for label, side_key in sides:
-            if y + row_h < self.rect.y + 54 or y > self.rect.bottom:
-                y += row_h
-                continue
-            screen.blit(self.font.render(label, True, COLOR_TEXT), (self.rect.x + 18, y + 3))
+            if self.rect.y + 54 <= y + row_h and y <= self.rect.bottom:
+                screen.blit(self.font.render(label, True, COLOR_TEXT), (self.rect.x + 18, y + 3))
             y += row_h
             cur = self._get_cl(side_key, "Agents")
-            btn_rect = pygame.Rect(self.rect.x + 18, y, 130, row_h)
-            color = COLOR_BUTTON_HOVER if btn_rect.collidepoint(pygame.mouse.get_pos()) else COLOR_BG_HEADER
-            pygame.draw.rect(screen, color, btn_rect, border_radius=3)
-            screen.blit(self.font_small.render(f"Agents: {cur}", True, COLOR_TEXT), (btn_rect.x + 4, y + 4))
-            self.cl_buttons[(side_key, "Agents")] = btn_rect
+            if self.rect.y + 54 <= y + row_h and y <= self.rect.bottom:
+                btn_rect = pygame.Rect(self.rect.x + 18, y, 130, row_h)
+                color = COLOR_BUTTON_HOVER if btn_rect.collidepoint(pygame.mouse.get_pos()) else COLOR_BG_HEADER
+                pygame.draw.rect(screen, color, btn_rect, border_radius=3)
+                screen.blit(self.font_small.render(f"Agents: {cur}", True, COLOR_TEXT), (btn_rect.x + 4, y + 4))
+                self.cl_buttons[(side_key, "Agents")] = btn_rect
             y += row_h
             if cur == "SOLID":
                 wall_key = f"CL_AGENTS_WALL_{side_key}"
                 wall_val = self.params.get(wall_key, "AGENT_STOP")
-                wbtn_rect = pygame.Rect(self.rect.x + 18, y, 130, row_h)
-                wcolor = COLOR_BUTTON_HOVER if wbtn_rect.collidepoint(pygame.mouse.get_pos()) else COLOR_BG_HEADER
-                pygame.draw.rect(screen, wcolor, wbtn_rect, border_radius=3)
-                screen.blit(self.font_small.render(f"paroi: {wall_val}", True, COLOR_TEXT), (wbtn_rect.x + 4, y + 4))
-                self.wall_buttons[side_key] = wbtn_rect
+                if self.rect.y + 54 <= y + row_h and y <= self.rect.bottom:
+                    wbtn_rect = pygame.Rect(self.rect.x + 18, y, 130, row_h)
+                    wcolor = COLOR_BUTTON_HOVER if wbtn_rect.collidepoint(pygame.mouse.get_pos()) else COLOR_BG_HEADER
+                    pygame.draw.rect(screen, wcolor, wbtn_rect, border_radius=3)
+                    screen.blit(self.font_small.render(f"paroi: {wall_val}", True, COLOR_TEXT), (wbtn_rect.x + 4, y + 4))
+                    self.wall_buttons[side_key] = wbtn_rect
                 y += row_h
             y += 2
         return y
@@ -822,49 +829,6 @@ class LeftPanelTree:
     _CL_CHOICES_MATTER = ["TORIC", "NEUMANN", "DIRICHLET"]
     _CL_CHOICES_AGENTS = ["TORIC", "SOLID"]
 
-    def _draw_environment(self, screen, y):
-        """Environment section: 4 sides x (MD1, MD2, Agents) with cycling buttons."""
-        self.cl_buttons = {}  # (side, matter) -> rect
-        row_h = 22
-        sides = [
-            ("X - Gauche", "LEFT", "X"), ("X - Droite", "RIGHT", "X"),
-            ("Y - Haut", "TOP", "Y"), ("Y - Bas", "BOTTOM", "Y"),
-        ]
-        for label, side_key, _axis in sides:
-            if y + row_h < self.rect.y + 26 or y > self.rect.bottom:
-                y += row_h
-                continue
-            screen.blit(self.font.render(label, True, COLOR_TEXT), (self.rect.x + 16, y + 3))
-            y += row_h
-            for matter, choices in (("MD1", self._CL_CHOICES_MATTER), ("MD2", self._CL_CHOICES_MATTER), ("Agents", self._CL_CHOICES_AGENTS)):
-                if y + row_h < self.rect.y + 26 or y > self.rect.bottom:
-                    y += row_h
-                    continue
-                cur = self._get_cl(side_key, matter)
-                btn_rect = pygame.Rect(self.rect.x + 16, y, self.rect.w - 32, row_h)
-                color = COLOR_BUTTON_HOVER if btn_rect.collidepoint(pygame.mouse.get_pos()) else COLOR_BG_HEADER
-                pygame.draw.rect(screen, color, btn_rect, border_radius=3)
-                screen.blit(self.font_small.render(f"{matter}: {cur}", True, COLOR_TEXT), (self.rect.x + 22, y + 3))
-                self.cl_buttons[(side_key, matter)] = btn_rect
-                y += row_h
-        # Paramètre lié : valeur Dirichlet éditable
-        if y + row_h < self.rect.y + 26 or y > self.rect.bottom:
-            y += row_h
-        screen.blit(self.font.render("Dirichlet:", True, COLOR_TEXT), (self.rect.x + 16, y + 3))
-        # Valeur justifiée à DROITE
-        txt_d = str(cur)
-        val_wd = self.font_small.size(txt_d)[0]
-        val_rect = pygame.Rect(self.rect.x + self.rect.w - val_wd - 12, y, val_wd + 12, row_h)
-        cur = self.params.get("CL_DIRICHLET_VALUE", 0.0)
-        color = COLOR_GREEN if self.editing_key == "CL_DIRICHLET_VALUE" else COLOR_TEXT
-        txt = (self.editing_text + "|") if self.editing_key == "CL_DIRICHLET_VALUE" else str(cur)
-        pygame.draw.rect(screen, (30, 40, 60) if self.editing_key == "CL_DIRICHLET_VALUE" else COLOR_BG_HEADER,
-                         val_rect, border_radius=3)
-        screen.blit(self.font_small.render(txt, True, color), (val_rect.x + 6, y + 4))
-        self.param_value_rects["CL_DIRICHLET_VALUE"] = val_rect
-        y += row_h
-        return y
-
     def _get_cl(self, side_key, matter):
         """Lit la valeur CL courante (self.params = PARAMS pour MD, _agents_cl pour agents)."""
         if matter in ("MD1", "MD2"):
@@ -890,8 +854,3 @@ class LeftPanelTree:
             self.params[f"CL_{matter}_{side_key}"] = new
             if self.on_cl_change:
                 self.on_cl_change(side_key, matter, new)
-
-    def _draw_placeholder(self, screen, y, text):
-        surf = self.font.render(text, True, COLOR_TEXT_DIM)
-        screen.blit(surf, (self.rect.x + 16, y))
-        return y + 24

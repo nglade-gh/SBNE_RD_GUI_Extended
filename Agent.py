@@ -265,9 +265,14 @@ class Agent:
                                                     360 - vision_angle)) % 360
         angle_enfant_rad = math.radians(angle_enfant)
         # On utilise cet angle pour placer l'enfant à SPAWN_DISTANCE pixels dans une
-        # direction différente de la vision du parent (modulation sur le tore).
-        new_x = (self.x + self.SPAWN_DISTANCE * math.cos(angle_enfant_rad)) % self.env_width
-        new_y = (self.y + self.SPAWN_DISTANCE * math.sin(angle_enfant_rad)) % self.env_height
+        # direction différente de la vision du parent.
+        # A3 (2026-10-24) : l'ancien wrap torique INCONDITIONNEL téléportait l'enfant
+        # à travers les parois SOLID (parent près du mur gauche → enfant à l'opposé
+        # de la carte). Résolution des CL comme dans move(), sans rebond (placement
+        # unique, pas de trajectoire) : SOLID → l'enfant naît sur la paroi (STOP).
+        raw_x = self.x + self.SPAWN_DISTANCE * math.cos(angle_enfant_rad)
+        raw_y = self.y + self.SPAWN_DISTANCE * math.sin(angle_enfant_rad)
+        new_x, new_y = self._resolve_spawn(raw_x, raw_y, getattr(self, 'env_cl', None) or {})
         # On crée un nouvel agent enfant
         enfant = Agent(id_agent, new_x, new_y, self.energy, self.rotate_deg, self.env_width, self.env_height,
                        self.cost_rotate, self.cost_move, self.cost_eat, self.cost_neuron, self.cost_metabolism,
@@ -291,6 +296,34 @@ class Agent:
         enfant.mutate_eyes(pd_eye, lam_dist, lam_angle, lam_dir)
 
         return enfant
+
+    def _resolve_spawn(self, x, y, cl):
+        """A3 (2026-10-24) : résolution d'une position de naissance selon les CL agents.
+        Mêmes règles de bord que move() (mêmes seuils 1.0 / size-1.0) mais sans rebond :
+        c'est un placement unique, pas une trajectoire.
+        - TORIC → enroulement torique (comportement d'origine) ;
+        - SOLID → clamp sur la paroi [1, size-1] (l'enfant naît contre le mur) ;
+        - mélange → clamp du côté SOLID, enroulement du côté TORIC.
+        """
+        def resolve_x(vx):
+            if cl.get('x_left') == 'SOLID' and cl.get('x_right') == 'SOLID':
+                return min(max(vx, 1.0), self.env_width - 1.0)
+            if vx < 1.0:
+                return 1.0 if cl.get('x_left') == 'SOLID' else vx % self.env_width
+            if vx > self.env_width - 1.0:
+                return self.env_width - 1.0 if cl.get('x_right') == 'SOLID' else vx % self.env_width
+            return vx
+
+        def resolve_y(vy):
+            if cl.get('y_top') == 'SOLID' and cl.get('y_bottom') == 'SOLID':
+                return min(max(vy, 1.0), self.env_height - 1.0)
+            if vy < 1.0:
+                return 1.0 if cl.get('y_top') == 'SOLID' else vy % self.env_height
+            if vy > self.env_height - 1.0:
+                return self.env_height - 1.0 if cl.get('y_bottom') == 'SOLID' else vy % self.env_height
+            return vy
+
+        return resolve_x(x), resolve_y(y)
 
     def update(self, field, yeux, pw, wmax):
         """Un pas de l'agent. yeux = tuple (e1, e2, e3).
@@ -392,6 +425,12 @@ class Agent:
 
         eye_hits = [0, 0, 0]
 
+        # A4 (2026-10-24) : les capteurs respectent les CL des agents, comme move() :
+        # TORIC → la vision traverse la couture vers l'autre côté ;
+        # SOLID → le mur bloque la vue, l'œil ne voit que l'intérieur de l'environnement.
+        # (posé avant sense() dans Environnement.step(), toujours à jour)
+        cl = getattr(self, 'env_cl', None) or {}
+
         # --- Détection de la matière MD1/MD2 (échantillonnage dans chaque cône d'œil) ---
         # Un œil de type MD1 ne détecte que MD1, type MD2 que MD2, type Agents rien
         if field is not None:
@@ -411,6 +450,26 @@ class Agent:
                     # Conversion px -> grille (indexé [row=y, col=x])
                     sy = int((gy + d * math.sin(angle_regard)) / fdx)
                     sx = int((gx + d * math.cos(angle_regard)) / fdx)
+                    # A4 (2026-10-24) : point hors domaine → enrouler (bord TORIC) ou
+                    # ignorer l'échantillon (bord SOLID : le mur bloque la vue).
+                    # Avant : clamp fixe (jamais d'enroulement) — sous TORIC les yeux
+                    # MD1/MD2 étaient aveugles de l'autre côté de la couture.
+                    if sx < 0:
+                        if cl.get('x_left') == 'SOLID':
+                            continue
+                        sx += ncols
+                    elif sx >= ncols:
+                        if cl.get('x_right') == 'SOLID':
+                            continue
+                        sx -= ncols
+                    if sy < 0:
+                        if cl.get('y_top') == 'SOLID':
+                            continue
+                        sy += nrows
+                    elif sy >= nrows:
+                        if cl.get('y_bottom') == 'SOLID':
+                            continue
+                        sy -= nrows
                     if 0 <= sy < nrows and 0 <= sx < ncols:
                         mat = field.MD1[sy, sx] if eye_type == 1 else field.MD2[sy, sx]
                         if mat > 0.5:
@@ -425,15 +484,24 @@ class Agent:
                 continue
 
             dx = other.x - self.x
+            # A4 (2026-10-24) : le raccourci "image minimum" traverse un bord —
+            # gauche si dx > W/2, droit si dx < -W/2. Il n'est valable que si ce bord
+            # est TORIC ; sinon distance directe : l'agent est vu à sa vraie position
+            # (trop loin ou hors cône → non détecté, comme derrière un mur SOLID).
+            # Avant : enroulement inconditionnel → vue à travers les murs SOLID.
             if dx > self.env_width / 2:
-                dx -= self.env_width
+                if cl.get('x_left') != 'SOLID':
+                    dx -= self.env_width
             elif dx < -self.env_width / 2:
-                dx += self.env_width
+                if cl.get('x_right') != 'SOLID':
+                    dx += self.env_width
             dy = other.y - self.y
             if dy > self.env_height / 2:
-                dy -= self.env_height
+                if cl.get('y_top') != 'SOLID':
+                    dy -= self.env_height
             elif dy < -self.env_height / 2:
-                dy += self.env_height
+                if cl.get('y_bottom') != 'SOLID':
+                    dy += self.env_height
             dist_sq = dx * dx + dy * dy
             angle_cible = math.atan2(dy, dx)
             for idx, eye in enumerate(self.eyes):

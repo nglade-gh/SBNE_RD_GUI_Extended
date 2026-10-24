@@ -35,11 +35,11 @@ reproduces when it reaches **1200** (`DIVISION_ENERGY`): the child is placed
 ### The brain (SBN)
 - **Signed boolean network** neuron states: `0/1`, **integer** weights bounded
   by `VALEUR_MAX_POIDS` (5).
-- 11 **organs** = fundamental neurons, **non-deletable** (fixed indices):
+- 12 **organs** = fundamental neurons, **non-deletable** (fixed indices):
 
   | Index | Organ | Role |
   |---|---|---|
-  | 0 | Eye 1 (`EYE_1`) | Input: what the agent sees (cone with own distance/angle/direction) |
+  | 0 | Eye 1 (`EYE_1`) | Input: what the agent sees (own cone: distance, angle, direction, type, near_min) |
   | 1 | Eye 2 (`EYE_2`) | Input: same, independent parameters |
   | 2 | Eye 3 (`EYE_3`) | Input: same, independent parameters |
   | 3 | Mouth agents (`MOUTH`) | Action: eat another agent |
@@ -49,14 +49,22 @@ reproduces when it reaches **1200** (`DIVISION_ENERGY`): the child is placed
   | 7 | Move backward (`MOVE_BACKWARD`) | Action: move opposite to heading |
   | 8 | Strafe left (`MOVE_STRAFE_LEFT`) | Action: move perpendicular left (−90°) |
   | 9 | Strafe right (`MOVE_STRAFE_RIGHT`) | Action: move perpendicular right (+90°) |
-  | 10 | Fin R (`ROTATE`) | Action: turn |
+  | 10 | Rotate left (`ROTATE_LEFT`) | Action: turn left by 5° |
+  | 11 | Rotate right (`ROTATE_RIGHT`) | Action: turn right by 5° |
 
-- The network starts with 11 nodes (organs only); other nodes and edges are free. At each
-  birth, the child's brain undergoes mutations: **deletion** of node/edge
-  (`PROBA_DELETION`), **insertion** (`PROBA_INSERTION`), **weight evolution**
-  (`PROBA_EVOLUTION`).
+- The network starts with **16 nodes** (`INITIAL_NODES`): the 12 organs plus two
+  2-node **memory chains** for the rotations (indices 12-13 for
+  `ROTATE_LEFT`, 14-15 for `ROTATE_RIGHT`, each self-inhibiting so the turn
+  oscillates instead of staying stuck — this produces curved motion rather
+  than a frozen pivot). Other nodes and edges are free.
+- At each birth, the child's brain undergoes mutations: **deletion** of
+  node/edge (`PROBA_DELETION`), **insertion** (`PROBA_INSERTION`),
+  **weight evolution** (`PROBA_EVOLUTION`).
+- With `RANDOM_SBN = True`, each agent is given a **random** brain at creation
+  instead of the default one (`CONNECTIVITE_SBN` = target mean out-degree).
 - Each step: `state_out = (state @ weights > 0)`; organ outputs give actions
-  (eat agent, consume MD1/MD2, move forward/backward/strafe left/strafe right, turn).
+  (eat agent, consume MD1/MD2, move forward/backward/strafe left/strafe right,
+  rotate left/rotate right).
 
 ### Energy and MD1/MD2 reaction-diffusion
 - **3 mouths, 3 food sources**: an agent can eat **another agent** (duel:
@@ -92,8 +100,10 @@ reproduces when it reaches **1200** (`DIVISION_ENERGY`): the child is placed
 2. Shuffle agents (fairness: no privileged order).
 3. Rebuild the **spatial grid** (O(1) neighbor lookup instead of O(n²),
    with toroidal wrapping).
-4. For each agent: **perception** (agents + matter in 3 eye cones), **SBN step**,
-   actions (eat agent / consume MD1 / consume MD2 / move forward/backward/strafe / turn), possible
+4. For each agent: **perception** (each eye scans its own cone, for its own
+   target type — agents, MD1 or MD2 — between `near_min` and its max distance),
+   **SBN step**, actions (eat agent / consume MD1 / consume MD2 / move
+   forward/backward/strafe left/strafe right / rotate left/rotate right), possible
    **division** (child acts next step) + recording mutated brain to database.
    All spent energy is released as MD1 at the agent's position.
 5. Resolve duels, clean up dead (mark-and-sweep), then **reaction-diffusion**
@@ -101,20 +111,41 @@ reproduces when it reaches **1200** (`DIVISION_ENERGY`): the child is placed
 
 ### Extended agent features (SBNE_RD_GUI_Extended fork)
 
-- **3 eyes** (`EYE_1`, `EYE_2`, `EYE_3`): each eye has its own random parameters
-  drawn at creation:
-  - **distance** (1–100 px, includes the original 70 px)
-  - **angle** (5–60°, includes the original 30°)
-  - **direction** (0–360°, relative to the agent's heading axis)
-  Each eye detects **both agents and matter** (MD1/MD2) inside its vision cone.
-  An eye is activated (`1`) if at least one target is visible.
+- **3 eyes** (`EYE_1`, `EYE_2`, `EYE_3`): each eye is a 5-tuple
+  `(distance, angle, direction, type, near_min)` drawn independently at creation:
+  - **distance** — max range in px, drawn in `[EYE_DISTANCE_MIN, EYE_DISTANCE_MAX]`
+    (defaults 1–100)
+  - **angle** — half-opening of the cone, drawn in `[EYE_ANGLE_MIN, EYE_ANGLE_MAX]`
+    (defaults 5–60°)
+  - **direction** — pointing direction relative to the agent's heading axis, drawn
+    in `[EYE_DIRECTION_MIN, EYE_DIRECTION_MAX]` (defaults 0–360°)
+  - **type** — the eye detects **only one kind of target**: agents, MD1, or MD2
+    (drawn at creation). An eye is activated (`1`) if at least one target of its
+    own type is inside its cone.
+  - **near_min** — **minimum vision distance**, drawn between `EYE_DISTANCE_MIN`
+    and the eye's own max distance. Nothing is detected between the agent and
+    `near_min` (nor beyond `distance`): this prevents an agent from "seeing" the
+    matter it has just produced, or itself.
 - **4 movements**: `MOVE_FORWARD` (heading), `MOVE_BACKWARD` (+180°),
   `MOVE_STRAFE_LEFT` (−90°), `MOVE_STRAFE_RIGHT` (+90°). All cost `COST_MOVE`
   and are non-deletable.
+- **2 rotations**: `ROTATE_LEFT` and `ROTATE_RIGHT`, each turning the agent by
+  **5°** and costing `COST_ROTATE`. They replace the single old `ROTATE` organ
+  and are non-deletable.
 - **Eye parameter mutation** at division (`PROBA_MUTATION_EYE` = 0.3): each eye
   parameter (distance, angle, direction) is mutated independently with an
-  **exponential law** — a value close to the parent's is probable, but a very
-  different value is possible (exponential tail). Clamped to parameter bounds.
+  **exponential law**, with a per-parameter scale λ
+  (`EYE_MUT_LAMBDA_DISTANCE` = 10, `EYE_MUT_LAMBDA_ANGLE` = 10,
+  `EYE_MUT_LAMBDA_DIRECTION` = 60):
+
+  ```
+  value' = value ± Exp(1/λ)   then clamped to the parameter's [min, max]
+  ```
+
+  A value close to the parent's is probable, but a very different one stays
+  possible (exponential tail) — so the drift is **tunable via λ** without being
+  deterministic. `near_min` is re-drawn in `[EYE_DISTANCE_MIN, distance]` and the
+  eye's type is inherited unchanged.
 
 ---
 
@@ -123,22 +154,36 @@ reproduces when it reaches **1200** (`DIVISION_ENERGY`): the child is placed
 The `1920 × 980` window is organized in 5 zones:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│ Control bar: [⏸ Pause][⏹ Stop][↺ Restart][🖼 Graphics] [☰ Menu] │
-│                 [Refresh: 30 FPS ●──────]                        │
-├──────────┬────────────────────────────────────┬──────────────────┤
-│ LEFT     │  Info bar (STEPS/POP/ENERGY)       │  RIGHT PANEL     │
-│ PANEL    ├────────────────────────────────────┤  BRAINS / STATS  │
-│          │                                    │  [61][139][104]  │
-│ EXPLORER │         WORLD (1280×720)           │  SBN graph       │
-│          │         agents + matter            │                  │
-│ Params   │                                    │  STATISTICS      │
-│ Agents   │                                    │  Pop: 150 ...    │
-│          │                                    │                  │
-├──────────┴────────────────────────────────────┴──────────────────┤
-│ CONSOLE (colored logs: green=info, yellow=warning, red=error)   │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ Control bar: [⏸ Pause][⏹ Stop][↺ Restart][🖼 Graphics] [☰ Menu]     │
+│                    [Refresh: 30 FPS ●──────]                         │
+├──────────┬───────────────────────────────────────┬─────┬────────────┤
+│ LEFT     │  Info bar (STEPS/POP/ENERGY)          │ MD1 │  RIGHT     │
+│ PANEL    ├───────────────────────────────────────┤ ▲   │  PANEL     │
+│ (reaches │                                       │ │   │  (reaches  │
+│  the     │          WORLD (1280×720)             │ │   │   the      │
+│  bottom) │          agents + matter              │ ▼   │   bottom)  │
+│          │                                       │ MD2 │            │
+│ EXPLORER │                                       │ ▲   │  BRAIN     │
+│          │                                       │ │   │  CREATURE  │
+│ Params   │                                       │ ▼   │  STATISTICS│
+│ Agents   │                                       │     │            │
+│          │                                       │     │  graphs /  │
+│          │                                       │     │  curves    │
+├──────────┴───────────────────────────────────────┴─────┴────────────┤
+│ CONSOLE — width = the simulation environment (world + colour scales) │
+│ (colored logs: green=info, yellow=warning, red=error)                │
+└──────────────────────────────────────────────────────────────────────┘
 ```
+
+Layout notes:
+- The **left panel (explorer)** and the **right panel** both reach the bottom of
+  the window; the console no longer spans underneath them.
+- The **console is exactly as wide as the simulation environment** (world +
+  colour scales).
+- The **colour scales** occupy a narrow strip (a few tens of px) to the right of
+  the world: **MD1 on top, MD2 below**, each a **vertical** gradient bar (max at
+  the top, min at the bottom) with the current min/max values shown at its ends.
 
 ### Control bar (top, below info bar)
 | Control | Effect |
@@ -157,9 +202,13 @@ Two selectable tabs at the top:
   - **Simulation**: `TEST_NAME`, `SEED`, `MAX_ITERATIONS`, `DISPLAY_REFRESH_FPS`,
     `MAX_SELECTED_SBN`
   - **Agents**: `NUM_AGENTS`, `BASE_ENERGY`, `DIVISION_ENERGY`,
-    `DISTANCE_VISION`, `VISION_ANGLE`, `CONSUME_QTY`, `VALEUR_MAX_POIDS`,
+    `CONSUME_QTY`, `VALEUR_MAX_POIDS`, `RANDOM_SBN`, `CONNECTIVITE_SBN`,
     `COST_NEURON`, `COST_MOVE`, `COST_ROTATE`, `COST_EAT`, `COST_METABOLISM`
-  - **Evolution**: `PROBA_EVOLUTION`, `PROBA_INSERTION`, `PROBA_DELETION`
+  - **Eyes**: `EYE_DISTANCE_MIN` / `EYE_DISTANCE_MAX`, `EYE_ANGLE_MIN` /
+    `EYE_ANGLE_MAX`, `EYE_DIRECTION_MIN` / `EYE_DIRECTION_MAX`
+  - **Evolution**: `PROBA_EVOLUTION`, `PROBA_INSERTION`, `PROBA_DELETION`,
+    `PROBA_MUTATION_EYE`, `EYE_MUT_LAMBDA_DISTANCE`, `EYE_MUT_LAMBDA_ANGLE`,
+    `EYE_MUT_LAMBDA_DIRECTION`
   - **Environment**: `DX_GRID`, `NUM_MD1_INIT`, `MD1_INIT_QTY`, `D_MD1`, `D_MD2`,
     `K_MD1_MD2` + boundary conditions (see §1)
 - **Agents**: list of living agents (`†` = dead). **Click = select/deselect**
@@ -174,14 +223,44 @@ Boundary conditions in the Environment sub-section:
   (billiard-ball elastic reflection).
 
 ### Right Panel
-- **BRAINS**: tab row (1 per selected agent, max `MAX_SELECTED_SBN` = 5).
-  Each tab shows the agent's SBN (organ/internal nodes, edges +/− with weights).
-  Selecting more than 5 agents → red console message.
+Three tabs, in this order: **BRAIN**, **CREATURE**, **STATISTICS**. The upper
+part of the panel is dedicated to the selected agent's drawings (brain, creature)
+or to the statistics table; the lower part is dedicated to the curves (organ
+activity in the CREATURE tab, quantity tracking in the STATISTICS tab).
+
+- **BRAIN**: a tab row (1 per selected agent, max `MAX_SELECTED_SBN` = 5).
+  Each tab shows the agent's SBN: organ/internal nodes, and arcs drawn as
+  **arrows** (source → destination, arrowhead on the destination). Arc colour
+  encodes the weight sign — **green** for `w > 0`, **red** for `w < 0` — and the
+  closer the weight is to 0, the darker the colour. A dropdown chooses the layout
+  (circular / hierarchical / spring). Selecting more than 5 agents → red console
+  message.
+- **CREATURE**: a physical representation of the creature —
+  - a circle whose **radius is proportional to its current energy**, normalised
+    by `DIVISION_ENERGY` (so the circle grows and shrinks as the agent eats and
+    spends);
+  - on the circle, only the **oriented organs**: the 3 eyes (at their own
+    direction) and the 4 movements (at fixed angles);
+  - from each eye, its **vision cone** is drawn;
+  - below, an **organ activity diagram**: one line per organ, a coloured dot when
+    that organ is active, nothing when it is not (dot runs and gaps). The time
+    window is adjustable — 150 steps by default.
 - **STATISTICS**: population, mean energy, mean nodes, max age, agent energy,
   MD1 total, MD2 total, global energy, steps, selected agents — updated every
-  frame.
+  frame. Plus a **tracking graph** with an adjustable sliding window (2000 steps
+  by default) over 4 **normalised 0–1** curves: agents, agent energy, MD1, MD2.
+  The current min/max of each curve are displayed **on two lines above the
+  graph**, in the curves' own colour code, so they cannot be hidden by the
+  curves; the window-size stepper sits above them.
+
+### World display
+- Agents are drawn as an **elongated isosceles triangle** (an arrow) pointing in
+  their heading direction: length ≈ 1.5× and width ≈ 0.8× the diameter of the
+  old dot.
+- Vision cones can be shown/hidden with `V`.
 - **Matter display**: keys `1` (MD1 only, green), `2` (MD2 only, red), `3`
-  (MD1+MD2 blend — yellow/orange where both coexist).
+  (MD1+MD2 blend — yellow/orange where both coexist), with the two vertical
+  colour scales described above.
 
 ### Menu (☰ button)
 - **Save simulation**: pickle state (agents, field, stats, RNG) to a file.
@@ -324,11 +403,17 @@ Keyboard and mouse shortcuts are documented in §2 (graphical interface).
 | `PROBA_EVOLUTION` | `0.8` | Probability of evolving a weight. |
 | `PROBA_MUTATION_EYE` | `0.3` | Probability of mutating each eye parameter at birth (exponential law). |
 | `VALEUR_MAX_POIDS` | `5` | Max weight amplitude (integers). |
-| `DISTANCE_VISION` | `70` | Vision range (px). |
-| `VISION_ANGLE` | `30` | Half-angle of vision cone (degrees). |
+| `RANDOM_SBN` | `False` | `True` = draw a **random** brain per agent at creation instead of the default network. |
+| `CONNECTIVITE_SBN` | `2` | Target mean out-degree (edges per node) of random brains. |
+| `EYE_DISTANCE_MIN` / `EYE_DISTANCE_MAX` | `1.0` / `100.0` | Bounds of the eye's max range (px). |
+| `EYE_ANGLE_MIN` / `EYE_ANGLE_MAX` | `5.0` / `60.0` | Bounds of the eye cone's half-opening (degrees). |
+| `EYE_DIRECTION_MIN` / `EYE_DIRECTION_MAX` | `0.0` / `360.0` | Bounds of the eye's pointing direction, relative to the heading axis (degrees). |
+| `EYE_MUT_LAMBDA_DISTANCE` | `10.0` | Scale λ of the exponential mutation law for the eye distance. |
+| `EYE_MUT_LAMBDA_ANGLE` | `10.0` | Idem for the cone angle. |
+| `EYE_MUT_LAMBDA_DIRECTION` | `60.0` | Idem for the direction. |
 | `COST_NEURON` | `0.1` | Cost per neuron, per step. |
-| `COST_MOVE` | `0.3` | Cost of moving. |
-| `COST_ROTATE` | `0.1` | Cost of turning. |
+| `COST_MOVE` | `0.3` | Cost of a move (same for all 4 movements). |
+| `COST_ROTATE` | `0.1` | Cost of a rotation (same for `ROTATE_LEFT` and `ROTATE_RIGHT`). |
 | `COST_EAT` | `0.01` | Cost of eating / consuming MD1 / MD2 (same for 3 mouths). |
 | `COST_METABOLISM` | `0.1` | Base cost per step. |
 | `CONSUME_QTY` | `100.0` | Matter (MD1/MD2) consumed per mouth attempt. |

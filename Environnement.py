@@ -67,7 +67,6 @@ _ORIGINAL_PARAMS = {
     "CL_MD1_LEFT": "TORIC", "CL_MD1_RIGHT": "TORIC", "CL_MD1_TOP": "TORIC", "CL_MD1_BOTTOM": "TORIC",
     "CL_MD2_LEFT": "TORIC", "CL_MD2_RIGHT": "TORIC", "CL_MD2_TOP": "TORIC", "CL_MD2_BOTTOM": "TORIC",
     "CL_AGENTS_LEFT": "TORIC", "CL_AGENTS_RIGHT": "TORIC", "CL_AGENTS_TOP": "TORIC", "CL_AGENTS_BOTTOM": "TORIC",
-    "CL_DIRICHLET_VALUE": 0.0,
 }
 
 _SBNE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Parameters")
@@ -253,10 +252,9 @@ class Simulation:
                                        D_MD1=D_MD1, D_MD2=D_MD2, k_MD1_MD2=k_md1_md2, dt=1.0)
 
         # --- Conditions aux limites agents (TORIC / SOLID + murs) ---
-        self.cl_agents_x_left = PARAMS.get("CL_AGENTS_LEFT", "TORIC")
-        self.cl_agents_x_right = PARAMS.get("CL_AGENTS_RIGHT", "TORIC")
-        self.cl_agents_y_top = params.get("CL_AGENTS_TOP", "TORIC")
-        self.cl_agents_y_bottom = params.get("CL_AGENTS_BOTTOM", "TORIC")
+        # A2 (2026-10-24) : plus d'attributs self.cl_agents_x_left/... figés à l'init —
+        # PARAMS est la source unique (à jour en session), lue directement par step()
+        # et par _build_agents_cl() (→ move(), division(), sense()).
 
         # --- MUTATIONS DU CERVEAU ---
         self.proba_deletion = params.get("PROBA_DELETION", 0.01)
@@ -388,6 +386,11 @@ class Simulation:
         # En mode interactif, la simulation démarre en pause ; en headless
         # (lanceur, tests), elle démarre immédiatement.
         self.is_paused = not headless
+        # Bouton « step » : pas unitaires demandés par le thread principal (clic) et
+        # exécutés un à un par le thread simulation — fonctionne même en pause.
+        # Incrémenté/lus sous self.sim_lock (2026-10-24).
+        self.step_once_count = 0
+        self._hot_costs = None  # signature des coûts actuels (_apply_hot_params)
         self.temps_simule_ms = 0.0
         self.vision_cone = True
         self._stop_requested = False
@@ -423,8 +426,10 @@ class Simulation:
         btn_y = TOP_BAR_HEIGHT + 8  # 68 : sous le dashboard (50) et au-dessus du monde (110)
         # Boutons icônes (40px) ; le texte est dessiné par-dessus dans render()
         self.btn_pause = UIButton(pygame.Rect((10, btn_y, 40, btn_h)), "", self.ui_manager)
-        self.btn_restart = UIButton(pygame.Rect((60, btn_y, 40, btn_h)), "", self.ui_manager)
-        self.btn_graphics = UIButton(pygame.Rect((110, btn_y, 40, btn_h)), "", self.ui_manager)
+        # Avance d'un seul pas : flèche comme le run + un « 1 » dessus (2026-10-24)
+        self.btn_step = UIButton(pygame.Rect((60, btn_y, 40, btn_h)), "", self.ui_manager)
+        self.btn_restart = UIButton(pygame.Rect((110, btn_y, 40, btn_h)), "", self.ui_manager)
+        self.btn_graphics = UIButton(pygame.Rect((160, btn_y, 40, btn_h)), "", self.ui_manager)
         # Bouton quitter : icône croix rouge, TOUT À DROITE de la barre (évite les clics erronés)
         self.btn_stop = UIButton(pygame.Rect((self.win_width - RIGHT_PANEL_WIDTH - 50, btn_y, 40, btn_h)),
                                   "", self.ui_manager)
@@ -433,11 +438,12 @@ class Simulation:
                                   "", self.ui_manager)
 
         # Slider pour la fréquence de mise à jour graphique
+        # (décalé à 220 : le bouton « step » inséré à 60 a repoussé restart/graphics)
         self.slider_refresh = UIHorizontalSlider(
-            pygame.Rect((170, btn_y, 140, btn_h)),
+            pygame.Rect((220, btn_y, 140, btn_h)),
             self.display_refresh_fps, (1, 60), self.ui_manager)
         self.label_refresh = pygame_gui.elements.UILabel(
-            pygame.Rect((320, btn_y, 130, btn_h)),
+            pygame.Rect((370, btn_y, 130, btn_h)),
             f"Refresh: {self.display_refresh_fps} FPS",
             self.ui_manager)
 
@@ -482,11 +488,12 @@ class Simulation:
         btn_h = 36
         btn_y = TOP_BAR_HEIGHT + 8
         self.btn_pause.set_position((10, btn_y))
-        self.btn_restart.set_position((60, btn_y))
-        self.btn_graphics.set_position((110, btn_y))
+        self.btn_step.set_position((60, btn_y))
+        self.btn_restart.set_position((110, btn_y))
+        self.btn_graphics.set_position((160, btn_y))
         self.btn_stop.set_position((self.win_width - RIGHT_PANEL_WIDTH - 50, btn_y))
-        self.slider_refresh.set_position((170, btn_y))
-        self.label_refresh.set_position((320, btn_y))
+        self.slider_refresh.set_position((220, btn_y))
+        self.label_refresh.set_position((370, btn_y))
         # Panneau droit : descend jusqu'en bas
         self.right_tab_rects = {}  # repositionné à chaque rendu
         # Console : même largeur que l'environnement, décalée à droite du panneau gauche
@@ -651,6 +658,13 @@ class Simulation:
                     self.console.info("Simulation paused")
                 else:
                     self.console.info("Simulation resumed")
+            elif event.ui_element == self.btn_step:
+                # Avance d'un seul pas : la sim passe en pause et le thread simulation
+                # exécute exactement un pas (compteur lu sous sim_lock dans _sim_loop).
+                with self.sim_lock:
+                    self.step_once_count += 1
+                self.is_paused = True
+                self.console.info("Step: +1 pas (simulation en pause)")
             elif event.ui_element == self.btn_stop:
                 self.console.info("Simulation stopped by user")
                 self.running = False
@@ -666,6 +680,7 @@ class Simulation:
         elif event.type == pygame_gui.UI_HORIZONTAL_SLIDER_MOVED:
             if event.ui_element == self.slider_refresh:
                 self.display_refresh_fps = int(event.value)
+                PARAMS["DISPLAY_REFRESH_FPS"] = self.display_refresh_fps
                 self.label_refresh.set_text(f"Refresh: {self.display_refresh_fps} FPS")
 
         elif event.type == pygame.KEYDOWN:
@@ -806,25 +821,22 @@ class Simulation:
                                        D_MD2=float(PARAMS.get("D_MD2", 0.5)),
                                        k_MD1_MD2=float(PARAMS.get("K_MD1_MD2", 0.1)), dt=1.0)
         # Synchronise le panneau gauche (agents CL) — seulement en mode interactif
+        # (A2 : plus de setattr — PARAMS est la source unique)
         if hasattr(self, 'left_panel'):
             for side in ("LEFT", "RIGHT", "TOP", "BOTTOM"):
                 self.left_panel._agents_cl[side] = PARAMS.get(f"CL_AGENTS_{side}", "TORIC")
-                setattr(self, f"cl_agents_{side.lower()}", PARAMS.get(f"CL_AGENTS_{side}", "TORIC"))
         self.console.info(f"Parameters loaded ← {path}")
         self.menu.status_msg = f"Loaded: {os.path.basename(path)}"
 
     def _on_param_change(self, key, value):
         """Callback : un paramètre a été édité dans le panneau gauche.
-        left_panel.params est PARAMS (même référence), donc la valeur y est déjà.
-        Synchronise les attributs calculés (CL Dirichlet)."""
+        left_panel.params est PARAMS (même référence), donc la valeur y est déjà."""
         self.console.info(f"Parameter changed: {key} = {value}")
-        if key == "CL_DIRICHLET_VALUE":
-            self.cl_dirichlet_value = float(value)
 
     def _on_cl_change(self, side, matter, value):
-        """Callback: a boundary condition was changed in the explorer."""
-        if matter == "Agents":
-            setattr(self, f"cl_agents_{side.lower()}", value)
+        """Callback: a boundary condition was changed in the explorer.
+        A2 (2026-10-24) : plus de setattr — PARAMS (mis à jour par le panneau) est la
+        source unique ; step() et _build_agents_cl() la lisent directement."""
         self.console.info(f"CL {side} {matter} → {value}")
 
     def _toggle_agent_selection(self, agent_id):
@@ -919,6 +931,7 @@ class Simulation:
             self.total_steps = 0
             self.new_id = self.num_agents
             self.is_paused = False
+            self.step_once_count = 0
             self.temps_simule_ms = 0.0
             self._stop_requested = False
             self.selected_agents.clear()
@@ -938,7 +951,73 @@ class Simulation:
     # ========================================================================
     # LOGIQUE : UN PAS DE SIMULATION
     # ========================================================================
+    def _apply_hot_params(self):
+        """Synchronisation « à chaud » des paramètres — appelée en début de chaque
+        step() (2026-10-24).
+
+        L'explorateur de paramètres (GUIInterface) écrit dans le dictionnaire
+        PARAMS. Cette méthode recharge à chaque pas tous les paramètres
+        COMPORTAMENTEUX, pour qu'une modification en session prenne effet au pas
+        suivant SANS restart.
+
+        S'appliquent au Restart (conditions d'initialisation, par conception) :
+        SEED, NUM_AGENTS, BASE_ENERGY (énergie initiale), RANDOM_SBN,
+        CONNECTIVITE_SBN, EYE_DISTANCE/ANGLE/DIRECTION_MIN/MAX (yeux de la
+        population initiale), NUM_MD1_INIT, MD1_INIT_QTY (dépôts initiaux),
+        DX_GRID (structurel : change les dimensions de la grille MD1/MD2),
+        TEST_NAME (nom du dossier de sortie).
+        """
+        # --- Réaction-diffusion : coefficients de diffusion/conversion (le champ
+        #     MD1/MD2 est préservé, seuls les coefficients de Thomas sont recalés) ---
+        f = self.field
+        d1 = float(PARAMS.get("D_MD1", 0.5))
+        d2 = float(PARAMS.get("D_MD2", 0.5))
+        k = float(PARAMS.get("K_MD1_MD2", 0.1))
+        if d1 != f.D_MD1 or d2 != f.D_MD2 or k != f.k:
+            f.set_coefficients(d1, d2, k)
+        # --- Comportement des agents : appliqué à TOUS les agents (y compris les
+        #     agents existants). La diffusion vers les agents n'est exécutée que si
+        #     un coût a changé (sinon zéro travail). ---
+        hot = (
+            float(PARAMS.get("COST_NEURON", 1)),
+            float(PARAMS.get("COST_MOVE", 1)),
+            float(PARAMS.get("COST_ROTATE", 1)),
+            float(PARAMS.get("COST_EAT", 1)),
+            float(PARAMS.get("COST_METABOLISM", 0.05)),
+            float(PARAMS.get("CONSUME_QTY", 100.0)),
+            float(PARAMS.get("DIVISION_ENERGY", 600)),
+            float(PARAMS.get("VALEUR_MAX_POIDS", 3)),
+        )
+        if hot != self._hot_costs:
+            (self.cost_neuron, self.cost_move, self.cost_rotate, self.cost_eat,
+             self.cost_metabolism, self.consume_qty, self.division_energy,
+             self.valeur_max_poids) = hot
+            for agent in self.agents:
+                agent.cost_neuron, agent.cost_move, agent.cost_rotate = (
+                    self.cost_neuron, self.cost_move, self.cost_rotate)
+                agent.cost_eat, agent.cost_metabolism, agent.consume_qty = (
+                    self.cost_eat, self.cost_metabolism, self.consume_qty)
+            self._hot_costs = hot
+        # --- Probabilités de mutation (lues à la division, cf. step()) ---
+        self.proba_deletion = float(PARAMS.get("PROBA_DELETION", 0.01))
+        self.proba_insertion = float(PARAMS.get("PROBA_INSERTION", 0.02))
+        self.proba_mutation_eye = float(PARAMS.get("PROBA_MUTATION_EYE", 0.3))
+        self.eye_mut_lambda_distance = float(PARAMS.get("EYE_MUT_LAMBDA_DISTANCE", 10.0))
+        self.eye_mut_lambda_angle = float(PARAMS.get("EYE_MUT_LAMBDA_ANGLE", 10.0))
+        self.eye_mut_lambda_direction = float(PARAMS.get("EYE_MUT_LAMBDA_DIRECTION", 60.0))
+        # --- Nouveaux agents / sélection / affichage (cache rafraîchi à chaque pas ;
+        #     BASE_ENERGY, VISION_ANGLE, DISTANCE_VISION s'appliquent aux populations
+        #     créées au prochain Restart — cohérent avec le cadre évolutionnaire où
+        #     les yeux/vision sont des traits par agent). ---
+        self.base_energy = float(PARAMS.get("BASE_ENERGY", 100))
+        self.vision_angle = float(PARAMS.get("VISION_ANGLE", 45))
+        self.distance_vision = int(PARAMS.get("DISTANCE_VISION", self.distance_manger))
+        self.max_selected_sbn = int(PARAMS.get("MAX_SELECTED_SBN", 5))
+        self.display_refresh_fps = int(PARAMS.get("DISPLAY_REFRESH_FPS", 30))
+
     def step(self):
+        """Avance la simulation d'un pas : agents puis réaction-diffusion."""
+        self._apply_hot_params()
         self.total_steps += 1
         # Enregistrer les stats pour le graphique de suivi (fenêtre glissante)
         e_agents = sum(a.energy for a in self.agents)
@@ -996,8 +1075,13 @@ class Simulation:
                 agent.eat_md2(self.field)
 
             if agent.energy >= self.division_energy:
-                enfant = agent.division(self.new_id, self.vision_angle, self.proba_deletion, self.proba_insertion,
-                                        self.valeur_max_poids, self.proba_mutation_eye, self.total_steps,
+                # A5 (2026-10-24) : probabilités/mutations lues via les attributs
+                # rafraîchis à chaque pas par _apply_hot_params() → PARAMS est la
+                # source unique et la division voit les valeurs courantes en session.
+                enfant = agent.division(self.new_id, self.vision_angle,
+                                        self.proba_deletion, self.proba_insertion,
+                                        self.valeur_max_poids, self.proba_mutation_eye,
+                                        self.total_steps,
                                         self.eye_mut_lambda_distance, self.eye_mut_lambda_angle,
                                         self.eye_mut_lambda_direction)
                 self.new_id += 1
@@ -1037,19 +1121,34 @@ class Simulation:
         np.maximum(self.field.MD2, 0.0, out=self.field.MD2)
 
         # CL agents : bloquer aux bords solides
-        if self.cl_agents_x_left == "SOLID" or self.cl_agents_x_right == "SOLID" or \
-           self.cl_agents_y_top == "SOLID" or self.cl_agents_y_bottom == "SOLID":
+        # A2 (2026-10-24) : lecture directe de PARAMS — source unique, à jour en session.
+        # (Les anciens attributs self.cl_agents_x_left/... étaient figés à l'init : le
+        # callback GUI et load_params écrivaient un autre nom, sans préfixe x_/y_,
+        # donc ce clamp restait sur la valeur du démarrage — mur fantôme de 1 px
+        # après un passage SOLID→TORIC en session.)
+        cl_x_left = PARAMS.get("CL_AGENTS_LEFT", "TORIC")
+        cl_x_right = PARAMS.get("CL_AGENTS_RIGHT", "TORIC")
+        cl_y_top = PARAMS.get("CL_AGENTS_TOP", "TORIC")
+        cl_y_bottom = PARAMS.get("CL_AGENTS_BOTTOM", "TORIC")
+        if "SOLID" in (cl_x_left, cl_x_right, cl_y_top, cl_y_bottom):
             for agent in self.agents:
-                if self.cl_agents_x_left == "SOLID":
+                if cl_x_left == "SOLID":
                     agent.x = max(agent.x, 1.0)
-                if self.cl_agents_x_right == "SOLID":
+                if cl_x_right == "SOLID":
                     agent.x = min(agent.x, self.width - 1.0)
-                if self.cl_agents_y_top == "SOLID":
+                if cl_y_top == "SOLID":
                     agent.y = max(agent.y, 1.0)
-                if self.cl_agents_y_bottom == "SOLID":
+                if cl_y_bottom == "SOLID":
                     agent.y = min(agent.y, self.height - 1.0)
 
         self.agents = [a for a in self.agents if a.alive]
+        # Extinction → pause (pas d'arrêt : l'utilisateur peut modifier les paramètres
+        # et relancer avec le bouton Restart). G2 (2026-10-24) : ce bloc était du code
+        # mort (après le return de _build_agents_cl) — la pause à l'extinction n'a
+        # jamais fonctionné.
+        if len(self.agents) == 0 and not self.is_paused:
+            self.console.warning("Extinction : tous les agents sont morts — simulation en pause")
+            self.is_paused = True
         # Retirer de la sélection les agents morts (ils ne sont plus affichables)
         alive_ids = {a.id for a in self.agents}
         dead_selected = [aid for aid in self.selected_agents if aid not in alive_ids]
@@ -1066,7 +1165,10 @@ class Simulation:
         """Boundary condition for a matter (MD1/MD2) and a side."""
         val = PARAMS.get(f"{prefix}_{side}", "TORIC")
         if val == "DIRICHLET":
-            return ("DIRICHLET", PARAMS.get(f"CL_DIRICHLET_{side}_{prefix}", 0.0))
+            # Bug corrigé (2026-10-24) : prefix = "CL_MD1"/"CL_MD2", la clé PARAMS est
+            # "CL_DIRICHLET_{side}_MD1" → il faut retirer le préfixe "CL_", sinon .get()
+            # retombe sur 0.0 et toute valeur Dirichlet réglée dans la GUI était ignorée.
+            return ("DIRICHLET", PARAMS.get(f"CL_DIRICHLET_{side}_{prefix.removeprefix('CL_')}", 0.0))
         return val  # "TORIC" ou "NEUMANN"
 
     def _build_matter_cl(self, prefix):
@@ -1090,12 +1192,6 @@ class Simulation:
             'wall_top': PARAMS.get('CL_AGENTS_WALL_TOP', 'AGENT_STOP'),
             'wall_bottom': PARAMS.get('CL_AGENTS_WALL_BOTTOM', 'AGENT_STOP'),
         }
-
-        # Vérifier extinction → pause (pas d'arrêt : l'utilisateur peut
-        # modifier les paramètres et relancer avec le bouton Restart)
-        if len(self.agents) == 0:
-            self.console.warning("All agents dead — simulation paused")
-            self.is_paused = True
 
     # ========================================================================
     # RENDU
@@ -1181,6 +1277,7 @@ class Simulation:
         """Dessine les icônes au centre des boutons (UIButton au texte vide)."""
         for rect, draw_fn in [
             (self.btn_pause.rect, self._icon_run_pause),
+            (self.btn_step.rect, self._icon_step),
             (self.btn_restart.rect, self._icon_restart),
             (self.btn_graphics.rect, lambda s, cx, cy, p: self._icon_screen(s, cx, cy, enabled=self.show_graphics)),
             (self.btn_stop.rect, self._icon_stop),
@@ -1199,6 +1296,13 @@ class Simulation:
             # Pause : 2 barres jaunes
             pygame.draw.rect(screen, (230, 200, 60), (cx - 7, cy - 8, 5, 16))
             pygame.draw.rect(screen, (230, 200, 60), (cx + 2, cy - 8, 5, 16))
+
+    def _icon_step(self, screen, cx, cy, is_paused=False):
+        """Flèche verte (comme le run) avec un « 1 » dessus : avance d'un seul pas."""
+        points = [(cx - 5, cy - 8), (cx - 5, cy + 8), (cx + 8, cy)]
+        pygame.draw.polygon(screen, (60, 200, 80), points)
+        s = self.font_small.render("1", True, (20, 20, 25))
+        screen.blit(s, (cx + 1 - s.get_width() // 2, cy - s.get_height() // 2))
 
     @staticmethod
     def _icon_restart(screen, cx, cy, is_paused=False):
@@ -1984,14 +2088,35 @@ class Simulation:
         """Thread séparé : logique de simulation uniquement (AUCUNE opération
         SDL/rendu). Publie les données sous self.sim_lock pour le thread principal."""
         while self.sim_running:
-            if not self.is_paused:
+            # « À chaud » : la valeur max_steps passée au constructeur (CLI, > 0)
+            # fait foi ; sinon (GUI, max_steps=0) c'est PARAMS["MAX_ITERATIONS"],
+            # modifiable en session depuis l'explorateur.
+            max_steps = (self.max_steps if self.max_steps and self.max_steps > 0
+                         else int(PARAMS.get("MAX_ITERATIONS", 0)))
+            # Bouton « step » : pas unitaire(s) demandé(s) par le thread principal —
+            # traité AVANT la pause (c'est le but : avancer d'un pas en étant en pause)
+            with self.sim_lock:
+                n_step = self.step_once_count
+                self.step_once_count = 0
+            if n_step > 0:
+                with self.sim_lock:
+                    for _ in range(n_step):
+                        t0 = time.perf_counter()
+                        self.step()
+                        self.collect_stats()
+                        self.temps_simule_ms += (time.perf_counter() - t0) * 1000
+                        if max_steps and self.total_steps >= max_steps:
+                            self.sim_running = False
+                            self.running = False
+                            break
+            elif not self.is_paused:
                 with self.sim_lock:
                     for _ in range(self.n_iter):
                         t0 = time.perf_counter()
                         self.step()
                         self.collect_stats()
                         self.temps_simule_ms += (time.perf_counter() - t0) * 1000
-                        if self.max_steps and self.total_steps >= self.max_steps:
+                        if max_steps and self.total_steps >= max_steps:
                             self.sim_running = False
                             self.running = False  # arrête aussi la boucle principale
                             break

@@ -203,6 +203,23 @@ class ReactionDiffusion:
         Ainv = np.linalg.inv(A_mat)
         return (b_imp, off_imp, coin, z1, z2, Ainv)
 
+    def set_coefficients(self, D_MD1=None, D_MD2=None, k=None):
+        """Mise à jour « à chaud » des coefficients physiques.
+
+        Recalcule les coefficients de Thomas pré-calculés SANS toucher aux
+        champs MD1/MD2 (l'état de la matière est préservé). dx et dt sont
+        structuraux (ils changent la grille) : ils s'appliquent au Restart.
+        """
+        if D_MD1 is not None:
+            self.D_MD1 = float(D_MD1)
+            self._c1 = 0.5 * self.dt * self.D_MD1 / self.dx**2
+        if D_MD2 is not None:
+            self.D_MD2 = float(D_MD2)
+            self._c2 = 0.5 * self.dt * self.D_MD2 / self.dx**2
+        if k is not None:
+            self.k = float(k)
+            self._rk = 0.25 * self.dt * self.k
+
     def step(self, cl_md1=None, cl_md2=None):
         """Un pas de temps dt : diffusion + réaction MD1→MD2 (ADI Peaceman-Rachford).
 
@@ -218,20 +235,29 @@ class ReactionDiffusion:
             cl_md2 = {'x_left': 'TORIC', 'x_right': 'TORIC', 'y_top': 'TORIC', 'y_bottom': 'TORIC'}
 
         # --- MD1 : ∂MD1/∂t = D1∇²MD1 − k·MD1 (réaction incluse dans la matrice implicite) ---
-        md1_before = float(self.MD1.sum())
+        md1_before_grid = self.MD1.copy()
         self._adi_step(self.MD1, self._cyc_cache1_x, self._cyc_cache1_y, source=None, cl=cl_md1)
-        md1_loss = md1_before - float(self.MD1.sum())  # perte due à la réaction (la diffusion conserve)
 
         # --- MD2 : ∂MD2/∂t = D2∇²MD2 + k·MD1 (diffusion seule) ---
         self._adi_step(self.MD2, self._cyc_cache2_x, self._cyc_cache2_y, source=None, cl=cl_md2)
 
-        # --- Couplage exact : la matière perdue par MD1 va intégralement dans MD2 ---
-        if md1_loss > 0:
-            total = float(self.MD1.sum())
-            if total > 0:
-                self.MD2 += md1_loss * self.MD1 / total
-            else:
-                self.MD2 += md1_loss / self.MD2.size
+        # --- Couplage MD1→MD2 : la matière convertie par la réaction va dans MD2 ---
+        # Bug corrigé (2026-10-24) : la perte NETTE de MD1 n'est égale à la conversion
+        # que si la diffusion conserve (TORIC/NEUMANN). Sous DIRICHLET, le flux de bord
+        # (entrées/sorties) n'est pas une conversion : l'ancien code l'additionnait à
+        # md1_loss (surproduction de MD2 à la sortie, production nulle à l'entrée).
+        # Sous Dirichlet on mesure la conversion par trapèze k·dt·(MD1^n + MD1^{n+1})/2,
+        # erreur O(k²·dt²), cohérente avec la précision documentée du terme semi-implicite.
+        if any(isinstance(v, tuple) for v in cl_md1.values()):
+            self.MD2 += 0.5 * self.k * self.dt * (md1_before_grid + self.MD1)
+        else:
+            md1_loss = float(md1_before_grid.sum() - self.MD1.sum())
+            if md1_loss > 0:
+                total = float(self.MD1.sum())
+                if total > 0:
+                    self.MD2 += md1_loss * self.MD1 / total
+                else:
+                    self.MD2 += md1_loss / self.MD2.size
         self.sim_time += self.dt
 
     def _adi_step(self, u, cache_x, cache_y, source, cl):
@@ -259,11 +285,14 @@ class ReactionDiffusion:
             u_src = u_src.copy(); u_src[:, -1] = cl['x_right'][1]
 
         rhs = b_exp * u_src + off_exp * (np.roll(u_src, 1, axis=1) + np.roll(u_src, -1, axis=1))
-        # CL non torique : enlève le terme cyclique (valeur réelle de u, pas le bord Dirichlet)
+        # CL non torique : enlève le terme cyclique.
+        # Bug corrigé (2026-10-24) : le terme annulé est celui calculé depuis u_src (bord
+        # Dirichlet déjà imposé), pas depuis u — sinon résidu parasite dans la colonne
+        # Neumann quand le côté opposé est Dirichlet (mélanges Dirichlet/Neumann).
         if cl['x_left'] != "TORIC":
-            rhs[:, 0] -= off_exp * u[:, -1]
+            rhs[:, 0] -= off_exp * u_src[:, -1]
         if cl['x_right'] != "TORIC":
-            rhs[:, -1] -= off_exp * u[:, 0]
+            rhs[:, -1] -= off_exp * u_src[:, 0]
         # CL Neumann : la réflexion ajoute +c·u[0] au rhs (Laplacien bord = (u[1]-u[0])/dx²)
         if cl['x_left'] == "NEUMANN":
             rhs[:, 0] += off_exp * u[:, 0]
@@ -278,10 +307,14 @@ class ReactionDiffusion:
         b_exp_y = 2.0 - b_imp_y
         off_exp_y = -off_imp_y
         u_star_src = u_star
+        # Bug corrigé (2026-10-24) : y_top/y_bottom sont les LIGNES 0 / -1 de la grille
+        # (colonnes 0 / -1 = x_left / x_right). L'ancien code fixait les colonnes 0/-1,
+        # c'est-à-dire les bords x au lieu des bords y : toute condition Dirichlet y
+        # écrivait sa valeur dans la colonne entière et corrompait l'intérieur du champ.
         if isinstance(cl['y_top'], tuple) and cl['y_top'][0] == "DIRICHLET":
-            u_star_src = u_star_src.copy(); u_star_src[:, 0] = cl['y_top'][1]
+            u_star_src = u_star_src.copy(); u_star_src[0, :] = cl['y_top'][1]
         if isinstance(cl['y_bottom'], tuple) and cl['y_bottom'][0] == "DIRICHLET":
-            u_star_src = u_star_src.copy(); u_star_src[:, -1] = cl['y_bottom'][1]
+            u_star_src = u_star_src.copy(); u_star_src[-1, :] = cl['y_bottom'][1]
         rhs_y = b_exp_y * u_star_src.T + off_exp_y * (np.roll(u_star_src.T, 1, axis=1) + np.roll(u_star_src.T, -1, axis=1))
         if cl['y_top'] != "TORIC":
             rhs_y[:, 0] -= off_exp_y * u_star_src.T[:, -1]
@@ -334,16 +367,18 @@ class ReactionDiffusion:
             c[:, 0] = 0.0
             r = r.copy()
             r[:, 0] = v
-            if n > 1:
-                r[:, 1] -= off_imp * v  # transfert au voisin
+            # Bug corrigé (2026-10-24) : plus de "transfert au voisin" r[:,1] -= c·v.
+            # La ligne du bord impose déjà u[0]=v dans le système (Thomas), et le rhs
+            # calculé depuis u_src contient déjà le terme c·v — le ré-ajouter doublait
+            # le bord : état stationnaire non physique (valeur 1.33 au lieu du profil
+            # linéaire exact, vérifié par exécution).
         if isinstance(cl_right, tuple) and cl_right[0] == "DIRICHLET":
             v = cl_right[1]
             b[:, n - 1] = 1.0
             a[:, n - 1] = 0.0
             r = r.copy()
             r[:, n - 1] = v
-            if n > 1:
-                r[:, n - 2] -= off_imp * v
+            # (pas de transfert au voisin : même raison que côté gauche, cf. 2026-10-24)
 
         return _thomas_arrays(b, a, c, r)
 
