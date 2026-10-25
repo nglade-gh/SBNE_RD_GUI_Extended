@@ -102,12 +102,22 @@ class Agent:
         random.shuffle(candidates)
         random_arcs = set(candidates[:n_random])
 
-        # Poids aléatoires pour TOUS les arcs (y compris essentiels)
+        # Poids aléatoires pour TOUS les arcs (y compris essentiels).
+        # Bornés par Environnement.PARAMS['VALEUR_MAX_POIDS'] (défaut 5) — import
+        # paresseux DANS LA MÉTHODE pour éviter l'import circulaire
+        # Environnement → Agent → Environnement (Environnement importe Agent).
+        try:
+            from Environnement import PARAMS as _PARAMS
+            wmax = max(0, int(_PARAMS.get("VALEUR_MAX_POIDS", 5)))
+        except Exception:  # pragma: no cover — si Environnement est inimportable
+            wmax = 5
+        # Valeurs impaires de [-wmax, wmax] (zéro exclu pour garder un signal net).
+        pool = [v for v in range(-wmax, wmax + 1, 2) if v != 0] or [0]
         all_arcs = essential_arcs | random_arcs
         for i in range(n):
             for j in range(n):
                 if (i, j) in all_arcs:
-                    sbn.weights[i, j] = random.choice([-5, -3, -1, 1, 3, 5])
+                    sbn.weights[i, j] = random.choice(pool)
                 else:
                     sbn.weights[i, j] = 0
         self.sbn = sbn
@@ -221,16 +231,12 @@ class Agent:
             return True
         return False
 
-    def rotate(self):
-        self.angle += self.rotate_deg
-        self.angle %= 360
-
     def rotate_left(self):
-        self.angle -= 5.0  # rotation à gauche de 5°
+        self.angle -= self.rotate_deg  # rotation à gauche de ROTATE_DEG (PARAMS, défaut 5°)
         self.angle %= 360
 
     def rotate_right(self):
-        self.angle += 5.0  # rotation à droite de 5°
+        self.angle += self.rotate_deg  # rotation à droite de ROTATE_DEG (PARAMS, défaut 5°)
         self.angle %= 360
 
     def eat(self, victim):

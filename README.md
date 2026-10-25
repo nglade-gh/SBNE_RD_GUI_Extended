@@ -18,8 +18,10 @@ order 2 — see `ReactionDiffusion.py`.
   rendering (panels, SBN graphs, tabs, console). See `GUIInterface.py` and
   `gui_theme.json`.
 - Initial population: 150 agents (configurable), each with ~1000 energy.
-- **Global energy** (agents + MD1 + MD2) is **strictly conserved** at every
-  step — this is the simulator's control invariant.
+- **Global energy** (agents + MD1 + MD2) is **strictly conserved at every
+  step under TORIC and NEUMANN boundary conditions** — this is the
+  simulator's control invariant. DIRICHLET boundary conditions are a
+  matter source/sink (open world): see §11.
 
 ---
 
@@ -49,8 +51,8 @@ reproduces when it reaches **1200** (`DIVISION_ENERGY`): the child is placed
   | 7 | Move backward (`MOVE_BACKWARD`) | Action: move opposite to heading |
   | 8 | Strafe left (`MOVE_STRAFE_LEFT`) | Action: move perpendicular left (−90°) |
   | 9 | Strafe right (`MOVE_STRAFE_RIGHT`) | Action: move perpendicular right (+90°) |
-  | 10 | Rotate left (`ROTATE_LEFT`) | Action: turn left by 5° |
-  | 11 | Rotate right (`ROTATE_RIGHT`) | Action: turn right by 5° |
+  | 10 | Rotate left (`ROTATE_LEFT`) | Action: turn left by `ROTATE_DEG` (default 5°) |
+  | 11 | Rotate right (`ROTATE_RIGHT`) | Action: turn right by `ROTATE_DEG` (default 5°) |
 
 - The network starts with **16 nodes** (`INITIAL_NODES`): the 12 organs plus two
   2-node **memory chains** for the rotations (indices 12-13 for
@@ -58,8 +60,12 @@ reproduces when it reaches **1200** (`DIVISION_ENERGY`): the child is placed
   oscillates instead of staying stuck — this produces curved motion rather
   than a frozen pivot). Other nodes and edges are free.
 - At each birth, the child's brain undergoes mutations: **deletion** of
-  node/edge (`PROBA_DELETION`), **insertion** (`PROBA_INSERTION`),
-  **weight evolution** (`PROBA_EVOLUTION`).
+  node/edge (`PROBA_DELETION`) and **insertion** (`PROBA_INSERTION`, new
+  weights drawn in `[-VALEUR_MAX_POIDS, VALEUR_MAX_POIDS]`).
+  **`PROBA_EVOLUTION` is currently inoperative**: the weight drift
+  (`SbNetwork.weight_update`) is never called, so `insertion()` is the only
+  weight mutation in the loop today. (`weight_update` clamps the weight to
+  `[-wmax, wmax]` and would be used if the drift were re-enabled.)
 - With `RANDOM_SBN = True`, each agent is given a **random** brain at creation
   instead of the default one (`CONNECTIVITE_SBN` = target mean out-degree).
 - Each step: `state_out = (state @ weights > 0)`; organ outputs give actions
@@ -414,14 +420,16 @@ Keyboard and mouse shortcuts are documented in §2 (graphical interface).
 | `COST_NEURON` | `0.1` | Cost per neuron, per step. |
 | `COST_MOVE` | `0.3` | Cost of a move (same for all 4 movements). |
 | `COST_ROTATE` | `0.1` | Cost of a rotation (same for `ROTATE_LEFT` and `ROTATE_RIGHT`). |
+| `ROTATE_DEG` | `5.0` | Angle (degrees) of one `ROTATE_LEFT`/`ROTATE_RIGHT` action. |
 | `COST_EAT` | `0.01` | Cost of eating / consuming MD1 / MD2 (same for 3 mouths). |
 | `COST_METABOLISM` | `0.1` | Base cost per step. |
 | `CONSUME_QTY` | `100.0` | Matter (MD1/MD2) consumed per mouth attempt. |
 | `MAX_SELECTED_SBN` | `5` | Max selected agents (brain tabs). Exceeding → red console message. |
 | `DISPLAY_REFRESH_FPS` | `30` | Graphics update frequency (render FPS; slider 1–60 in control bar). |
-| `DX_GRID` | `20.0` | Matter grid step (px). |
+| `DX_GRID` | `20.0` | Matter grid step (px). Structural: applied at Restart. |
 | `D_MD1` / `D_MD2` | `0.5` | MD1/MD2 diffusion coefficients (px²/s). |
 | `K_MD1_MD2` | `0.1` | MD1→MD2 conversion rate (s⁻¹). |
+| `RD_DT` | `1.0` | Reaction-diffusion time step (s). Structural: applied at Restart (like `DX_GRID`). ADI stability: `c = 0.5·dt·D/dx²` must stay ≤ 0.25 — the panel turns `D_MD1`/`D_MD2`/`DX_GRID`/`RD_DT` red and logs a red console message when it is violated. |
 | `NUM_MD1_INIT` | `10` | Initial MD1 deposits. |
 | `MD1_INIT_QTY` | `500.0` | Energy per initial deposit (px²·energy). |
 | `CL_MD1_{side}` / `CL_MD2_{side}` | `TORIC` | Matter BC per side (TORIC / NEUMANN / DIRICHLET). |
@@ -448,7 +456,7 @@ To test a parameter variation in one command:
 | `stats.json` | Stats history (every 100 steps): population, mean network size, mean energy, **global energy**, + final totals. |
 | `evolution.db` | SQLite brain history database (see §9). |
 | `simulation_summary.png` | Graphical summary at simulation end. |
-| `exports/` | *(beyond 50,000 steps)* brain exports every 50,000 steps (CSV + graphs) via `ExportData.py` — feeds `Analyse.py`. |
+| `exports/` | *(beyond 50,000 steps)* brain exports every 50,000 steps (`agents_save_<iteration>.csv` via `ExportData.py`) — feeds `Analyse.py`. One row per agent: ID, iteration, position, SBN statistics (`Num_Nodes`, `Num_Edges`, `Num_Organ_Nodes`, `Sum_Weights`, `Abs_Sum_Weights`, `Max_Abs_Weight`, `Min_Weight`, `Max_Weight`, `Sum_Pos_Weights`, `Sum_Neg_Weights`, `Num_Pos_Weights`, `Num_Neg_Weights`, `Num_Zero_Weights`, `Mean_Abs_Weight`), the 3 eyes (`Eye{1,2,3}_Distance/Angle/Direction/Type/NearMin`), `Energy`, `Age`, `ID_Parent` — plus the **global aggregate** repeated on every row: `Global_Sum_Weights` / `Global_Abs_Sum_Weights` = sum of all weights of all agents at time t. The old truncated `Σ W^k` series (divergent: spectral radius ρ(W) > 1) was removed. |
 | `campaign.json` | *(launcher)* provenance: campaign, run, seed, overrides. |
 | `run.log` | *(launcher)* process output. |
 
@@ -524,7 +532,7 @@ and 32 cores are exploited for **campaigns** (not for a single simulation).
 
 | Tool | Usage |
 |---|---|
-| `Analyse.py` | Graphical pipeline on **exports** (CSV `agents_save_*.csv` produced by `ExportData.py` every 50,000 steps): `python Analyse.py` — scans `simulations/`, generates `1_temporel/`, `2_spatial/`, `3_moyennes_barplot/`. |
+| `Analyse.py` | Graphical pipeline on **exports** (CSV `agents_save_*.csv` produced by `ExportData.py` every 50,000 steps): `python Analyse.py` — scans `simulations/`, writes `analyse/1_dynamique_temporelle/`, `analyse/2_cartes_spatiales/`, `analyse/3_moyennes_barplot/`. <br>**`1_dynamique_temporelle/`** — `evolution_globale.png` (6 per-agent weight metrics, averaged per iteration: `Sum_Weights`, `Abs_Sum_Weights`, `Sum_Pos_Weights`, `Sum_Neg_Weights`, `Num_Edges`, `Mean_Abs_Weight`), `evolution_globale_aggregats.png` (`Global_Sum_Weights` / `Global_Abs_Sum_Weights`, one value per iteration), and `comparaison_<A>_vs_<B>.png` for each pair of the 6 metrics. <br>**`2_cartes_spatiales/`** — `spatial_<iteration>.png`, a 2×3 mosaic of spatial maps (position in x/y, variable in colour) over `Sum_Weights`, `Abs_Sum_Weights`, `Num_Edges`, `Mean_Abs_Weight`, `Energy`, `Eye1_Distance`. <br>**`3_moyennes_barplot/`** — `moyennes_<iteration>.png`, barplot of the population means of 4 weight metrics (bars normalised by the largest mean, real values annotated). <br>Robustness: a single bad CSV is reported and skipped, and one-iteration or one-row CSVs are handled. |
 | `analyse_evolution.py` | Example of brain reconstruction at an iteration (adapt `db_path`, `agent_id`, `target_iteration`). |
 | `genealogy_viewerv2.py` | Tkinter genealogy viewer (v2 recommended). |
 | `lignéfixv2.py` | Genealogy networkx on `evolution.db` **of current folder** (copy the base or launch from the right folder). |
@@ -537,10 +545,18 @@ Ad-hoc scripts (`analyse_evolution.py`, `lignéfixv2.py`) have the base path
 
 ## 11. Control invariant and verification
 
-> **Global energy is strictly conserved at every step.**
+> **Global energy is strictly conserved at every step — under TORIC and
+> NEUMANN boundary conditions.**
 > `Σ agent.energy + total(MD1) + total(MD2)` remains constant
-> (155,000.0 on reference runs). Any simulator modification that makes this
-> value drift has created an energy leak/bug.
+> (measured relative drift: 3e-13 over 2000 steps, seed 7, 2026-10-24). Any
+> simulator modification that makes this value drift has created an energy
+> leak/bug.
+>
+> **DIRICHLET is a matter source/sink** (open world): the boundary pins the
+> matter to a fixed value, so matter leaves/enters the world through the
+> boundary — measured: **−8.95 %** of total matter in 50 steps with
+> `D = 0.5` and Dirichlet value 0. The "any drift = bug" guard therefore does
+> **not** apply when any side uses DIRICHLET.
 
 Verifications to perform **after any modification** (and before saying "it's
 good"):
@@ -567,15 +583,20 @@ good"):
   manual launches in the same second would write to the same folder. The
   launcher circumvents by always passing explicit `--outdir`.
 - **Cleanup 2026-10-16**: dead duplicates (`save_network_state.py`,
-  `SpatialGridAgent.py`, `simulation_setup.py`) and `*.copy.py` backups were
-  removed from the repo (originals remain in git history). The local backup
-  convention `FILENAME.copy.py` is covered by `.gitignore`.
-- **Performance** (measured, 2026-10-16): ~8 ms/step at 150 agents (of which
-  ~7 ms = matplotlib tracking graph every 100 steps, **even in headless**),
-  ~62 ms/step at 500, ~1000 ms/step at 2000 (super-linear growth: at high
-  population, ~47% of time = SQLite commits (one per birth), ~24% =
-  perception/neighbors). Biggest win: disable graphs in headless + async
-  database writes.
+  `SpatialGridAgent.py`, `simulation_setup.py`) were removed from the tree.
+  **Corrigendum (2026-10-24)**: this project has **no git repository** (no
+  history, no `.gitignore`), and the `*.copy.py` backups
+  (`Agent.py.copy.py`, `Environnement.py.copy.py`, `GUIInterface.py.copy.py`,
+  `ReactionDiffusion.py.copy.py`) **still exist and are outdated** — they
+  contain none of the 2026-10-24 fixes (4–9 fixes in the live files). Do not
+  treat them as a snapshot of the current state.
+- **Performance**: 15.2 ms/step at 150 agents, headless (measured 2026-10-24),
+  of which ~2.8 ms = the ReactionDiffusion (ADI) solver (~18 %); ~20 ms/step
+  at 150 agents with console output enabled. The 500/2000-agent figures from
+  2026-10-16 (~62 ms/step, ~1000 ms/step; super-linear growth: at high
+  population, ~47 % of time = SQLite commits (one per birth), ~24 % =
+  perception/neighbors) have **not been re-measured since** and are kept as
+  order-of-magnitude only.
 
 ---
 

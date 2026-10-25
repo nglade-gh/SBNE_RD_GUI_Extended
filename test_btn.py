@@ -19,11 +19,15 @@ def clic(x, y):
 
 print("=== Boutons toolbar (via pipeline d'événements réel) ===")
 print("btn_pause rect:", sim.btn_pause.rect)
+# Simulation(headless=False) démarre EN PAUSE par conception (Environnement.py :
+# self.is_paused = not headless → True). Le bouton pause est une bascule (toggle) :
+#   clic 1 → non-pausé (is_paused=False), clic 2 → pausé (is_paused=True).
+# On part donc de l'état réel (pausé) et on vérifie la bascule dans les deux sens.
 clic(sim.btn_pause.rect.centerx, sim.btn_pause.rect.centery)
 print("is_paused après clic pause:", sim.is_paused)
-assert sim.is_paused, "LE BOUTON PAUSE NE MARCHE PAS"
+assert not sim.is_paused, "LE BOUTON PAUSE NE MARCHE PAS"
 clic(sim.btn_pause.rect.centerx, sim.btn_pause.rect.centery)
-assert not sim.is_paused, "LE BOUTON PAUSE (re clic) NE MARCHE PAS"
+assert sim.is_paused, "LE BOUTON PAUSE (re clic) NE MARCHE PAS"
 clic(sim.btn_graphics.rect.centerx, sim.btn_graphics.rect.centery)
 print("show_graphics après clic écran:", sim.show_graphics)
 assert not sim.show_graphics, "LE BOUTON GRAPHICS NE MARCHE PAS"
@@ -33,14 +37,19 @@ assert sim.total_steps == 0, "LE BOUTON RESTART NE MARCHE PAS"
 
 print("=== Panneau gauche (fold, scroll, édition) ===")
 sim.render()
-hdr = None
-for name, rect in sim.left_panel.section_headers.items():
-    if name == "Agents":
-        hdr = rect
+# Le sous-groupe « Agents » de l'onglet Parameters est DÉPLIÉ au départ
+# (param_groups_expanded initialisé à True pour tous les groupes, et le
+# Restart ne reconstruit pas le panneau).
+# La zone cliquable de son en-tête est stockée sous la clé "group:Agents"
+# (les "sections" du panneau concernent l'onglet Agents, pas les groupes de
+# paramètres).
+hdr = sim.left_panel.section_headers.get("group:Agents")
+assert hdr is not None, "HEADER group:Agents introuvable"
+assert sim.left_panel.param_groups_expanded["Agents"] == True, "groupe Agents censé être déplié au départ"
 clic(hdr.centerx, hdr.centery)
-assert sim.left_panel.sections["Agents"]["expanded"] == False, "FOLD NE MARCHE PAS"
+assert sim.left_panel.param_groups_expanded["Agents"] == False, "FOLD (replier) NE MARCHE PAS"
 clic(hdr.centerx, hdr.centery)
-assert sim.left_panel.sections["Agents"]["expanded"] == True, "UNFOLD NE MARCHE PAS"
+assert sim.left_panel.param_groups_expanded["Agents"] == True, "UNFOLD (déplier) NE MARCHE PAS"
 # Scrollbar drag
 sb = sim.left_panel.scrollbar_rect
 if sb:

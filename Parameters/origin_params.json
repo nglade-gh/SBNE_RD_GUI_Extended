@@ -20,12 +20,14 @@
     "COST_EAT": 0.01,
     "COST_METABOLISM": 0.1,
     "CONSUME_QTY": 100.0,
+    "ROTATE_DEG": 5.0,
     "MAX_SELECTED_SBN": 5,
     "DISPLAY_REFRESH_FPS": 30,
     "DX_GRID": 20.0,
     "D_MD1": 0.5,
     "D_MD2": 0.5,
     "K_MD1_MD2": 0.1,
+    "RD_DT": 1.0,
     "NUM_MD1_INIT": 10,
     "MD1_INIT_QTY": 500.0,
     "CL_MD1_LEFT": "TORIC",
@@ -39,6 +41,5 @@
     "CL_AGENTS_LEFT": "TORIC",
     "CL_AGENTS_RIGHT": "TORIC",
     "CL_AGENTS_TOP": "TORIC",
-    "CL_AGENTS_BOTTOM": "TORIC",
-    "CL_DIRICHLET_VALUE": 0.0
+    "CL_AGENTS_BOTTOM": "TORIC"
 }

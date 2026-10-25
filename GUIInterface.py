@@ -325,12 +325,13 @@ class LeftPanelTree:
             "Simulation":  ["TEST_NAME", "SEED", "MAX_ITERATIONS", "DISPLAY_REFRESH_FPS", "MAX_SELECTED_SBN"],
             "Agents":      ["NUM_AGENTS", "BASE_ENERGY", "DIVISION_ENERGY", "CONSUME_QTY", "VALEUR_MAX_POIDS",
                             "COST_NEURON", "COST_MOVE", "COST_ROTATE", "COST_EAT", "COST_METABOLISM",
+                            "ROTATE_DEG",
                             "EYE_DISTANCE_MIN", "EYE_DISTANCE_MAX", "EYE_ANGLE_MIN", "EYE_ANGLE_MAX",
                             "EYE_DIRECTION_MIN", "EYE_DIRECTION_MAX",
                             "RANDOM_SBN", "CONNECTIVITE_SBN"],
             "Evolution":   ["PROBA_EVOLUTION", "PROBA_INSERTION", "PROBA_DELETION", "PROBA_MUTATION_EYE",
                             "EYE_MUT_LAMBDA_DISTANCE", "EYE_MUT_LAMBDA_ANGLE", "EYE_MUT_LAMBDA_DIRECTION"],
-            "Environment": ["DX_GRID", "NUM_MD1_INIT", "MD1_INIT_QTY", "D_MD1", "D_MD2", "K_MD1_MD2"],
+            "Environment": ["DX_GRID", "NUM_MD1_INIT", "MD1_INIT_QTY", "D_MD1", "D_MD2", "K_MD1_MD2", "RD_DT"],
         }
         self.param_groups_expanded = {name: True for name in self.param_groups}
 
@@ -631,6 +632,33 @@ class LeftPanelTree:
         else:
             self.scrollbar_rect = None
 
+    def _adi_alert_keys(self):
+        """Clés de paramètres « en alerte » si la stabilité ADI est violée.
+
+        c = 0.5·dt·D/dx² ; si c > 0.25 pour MD1 ou MD2, les paramètres
+        D_MD1/D_MD2/DX_GRID/RD_DT concernés sont signalés en rouge.
+        Calculé directement depuis self.params (pas d'objet ReactionDiffusion)
+        et sans état persistant : le marquage disparaît dès qu'une valeur est
+        corrigée.
+        """
+        try:
+            dx = float(self.params.get("DX_GRID", 20.0))
+            dt = float(self.params.get("RD_DT", 1.0))
+            d1 = float(self.params.get("D_MD1", 0.5))
+            d2 = float(self.params.get("D_MD2", 0.5))
+        except (TypeError, ValueError):
+            return set()
+        if dx <= 0:
+            return set()
+        c1 = 0.5 * dt * d1 / dx**2
+        c2 = 0.5 * dt * d2 / dx**2
+        alert = set()
+        if c1 > 0.25:
+            alert |= {"D_MD1", "DX_GRID", "RD_DT"}
+        if c2 > 0.25:
+            alert |= {"D_MD2", "DX_GRID", "RD_DT"}
+        return alert
+
     def _draw_params(self, screen, y):
         """Parameters tab: collapsible sub-sections (Simulation / Agents /
         Evolution / Environment) + matter and agent BC in Environment."""
@@ -696,6 +724,8 @@ class LeftPanelTree:
             return y
 
         # Environment parameters (DX_GRID, etc.)
+        # Stabilité ADI : D_MD1/D_MD2/DX_GRID/RD_DT en rouge si c = 0.5·dt·D/dx² > 0.25
+        adi_alert = self._adi_alert_keys()
         for key in self.param_groups["Environment"]:
             value = self.params.get(key)
             if value is None:
@@ -710,7 +740,7 @@ class LeftPanelTree:
                 txt = self.editing_text + "|"
                 color = COLOR_GREEN
             else:
-                color = COLOR_TEXT
+                color = COLOR_RED if key in adi_alert else COLOR_TEXT
             val_w = self.font_small.size(txt)[0]
             val_rect = pygame.Rect(self.rect.x + self.rect.w - val_w - 12, y, val_w + 12, row_h)
             if self.editing_key == key:

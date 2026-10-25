@@ -220,6 +220,19 @@ class ReactionDiffusion:
             self.k = float(k)
             self._rk = 0.25 * self.dt * self.k
 
+    def stability(self, limit=0.25):
+        """Stabilité du schéma ADI par matière : c = 0.5·dt·D/dx².
+
+        ok=False quand c dépasse `limit` (schéma ADI non M-matrice →
+        valeurs négatives dans le champ). c1/c2 sont lus depuis les
+        coefficients pré-calculés (maintenus à jour par __init__ et
+        set_coefficients — aucun recalcul de dx/dt).
+        """
+        c1 = float(self._c1)
+        c2 = float(self._c2)
+        worst = max(c1, c2)
+        return {"c1": c1, "c2": c2, "ok": worst <= limit, "worst": worst}
+
     def step(self, cl_md1=None, cl_md2=None):
         """Un pas de temps dt : diffusion + réaction MD1→MD2 (ADI Peaceman-Rachford).
 

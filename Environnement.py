@@ -56,12 +56,14 @@ _ORIGINAL_PARAMS = {
     "COST_EAT": 0.01,
     "COST_METABOLISM": 0.1,
     "CONSUME_QTY": 100.0,
+    "ROTATE_DEG": 5.0,
     "MAX_SELECTED_SBN": 5,
     "DISPLAY_REFRESH_FPS": 30,
     "DX_GRID": 20.0,
     "D_MD1": 0.5,
     "D_MD2": 0.5,
     "K_MD1_MD2": 0.1,
+    "RD_DT": 1.0,
     "NUM_MD1_INIT": 10,
     "MD1_INIT_QTY": 500.0,
     "CL_MD1_LEFT": "TORIC", "CL_MD1_RIGHT": "TORIC", "CL_MD1_TOP": "TORIC", "CL_MD1_BOTTOM": "TORIC",
@@ -124,6 +126,7 @@ PARAMS = {
     "COST_EAT": 0.01,
     "COST_METABOLISM": 0.1,
     "CONSUME_QTY": 100.0,  # matter (MD1/MD2) consumed per mouth attempt
+    "ROTATE_DEG": 5.0,     # rotation angle per ROTATE_LEFT/ROTATE_RIGHT action (deg)
     "MAX_SELECTED_SBN": 5,
     "EYE_DISTANCE_MIN": 1.0, "EYE_DISTANCE_MAX": 100.0,
     "EYE_ANGLE_MIN": 5.0, "EYE_ANGLE_MAX": 60.0,
@@ -138,6 +141,7 @@ PARAMS = {
     "D_MD1": 0.5,           # MD1 diffusion coefficient (px²/s)
     "D_MD2": 0.5,           # MD2 diffusion coefficient (px²/s)
     "K_MD1_MD2": 0.1,       # MD1→MD2 conversion rate (s⁻¹)
+    "RD_DT": 1.0,           # reaction-diffusion time step (s) — structural: applied at Restart
     "NUM_MD1_INIT": 10,     # initial MD1 deposits
     "MD1_INIT_QTY": 500.0,  # energy per initial deposit (px²·energy)
     # --- Matter boundary conditions (TORIC / NEUMANN / DIRICHLET) ---
@@ -226,7 +230,7 @@ class Simulation:
 
         # --- PHYSIQUE ET CAPACITÉS DES AGENTS ---
         self.taille_agent = int(params.get("TAILLE_AGENT", 5))
-        self.rotate_deg = params.get("ROTATE_DEG", 10)
+        self.rotate_deg = float(params.get("ROTATE_DEG", 5.0))
         self.vision_angle = params.get("VISION_ANGLE", 45)
         self.distance_manger = int(params.get("DISTANCE_MANGER", self.taille_agent * 2))
         self.distance_vision = int(params.get("DISTANCE_VISION", self.distance_manger))
@@ -249,7 +253,8 @@ class Simulation:
         D_MD2 = float(params.get("D_MD2", 0.5))
         k_md1_md2 = float(params.get("K_MD1_MD2", 0.1))
         self.field = ReactionDiffusion(self.width, self.height, dx_grid,
-                                       D_MD1=D_MD1, D_MD2=D_MD2, k_MD1_MD2=k_md1_md2, dt=1.0)
+                                       D_MD1=D_MD1, D_MD2=D_MD2, k_MD1_MD2=k_md1_md2,
+                                       dt=float(params.get("RD_DT", 1.0)))
 
         # --- Conditions aux limites agents (TORIC / SOLID + murs) ---
         # A2 (2026-10-24) : plus d'attributs self.cl_agents_x_left/... figés à l'init —
@@ -391,6 +396,7 @@ class Simulation:
         # Incrémenté/lus sous self.sim_lock (2026-10-24).
         self.step_once_count = 0
         self._hot_costs = None  # signature des coûts actuels (_apply_hot_params)
+        self._adi_unstable = False  # état de la stabilité ADI (_check_adi_stability)
         self.temps_simule_ms = 0.0
         self.vision_cone = True
         self._stop_requested = False
@@ -819,7 +825,8 @@ class Simulation:
                                        float(PARAMS.get("DX_GRID", 20.0)),
                                        D_MD1=float(PARAMS.get("D_MD1", 0.5)),
                                        D_MD2=float(PARAMS.get("D_MD2", 0.5)),
-                                       k_MD1_MD2=float(PARAMS.get("K_MD1_MD2", 0.1)), dt=1.0)
+                                       k_MD1_MD2=float(PARAMS.get("K_MD1_MD2", 0.1)),
+                                       dt=float(PARAMS.get("RD_DT", 1.0)))
         # Synchronise le panneau gauche (agents CL) — seulement en mode interactif
         # (A2 : plus de setattr — PARAMS est la source unique)
         if hasattr(self, 'left_panel'):
@@ -922,7 +929,7 @@ class Simulation:
                                            D_MD1=float(params.get("D_MD1", 0.5)),
                                            D_MD2=float(params.get("D_MD2", 0.5)),
                                            k_MD1_MD2=float(params.get("K_MD1_MD2", 0.1)),
-                                           dt=1.0)
+                                           dt=float(params.get("RD_DT", 1.0)))
             for _ in range(int(params.get("NUM_MD1_INIT", 10))):
                 x, y = random.randint(0, self.width), random.randint(0, self.height)
                 self.field.add_deposit(x, y, float(params.get("MD1_INIT_QTY", 500.0)))
@@ -945,6 +952,8 @@ class Simulation:
             self.spatial_grid = SpatialGrid(self.width, self.height, self.cell_size)
 
             self.console.info(f"Simulation reset — {self.num_agents} agents, seed={PARAMS.get('SEED', 42)}")
+            # Stabilité ADI : message rouge au Restart si la condition est violée
+            self._check_adi_stability(on_restart=True)
         finally:
             self.sim_lock.release()
 
@@ -965,7 +974,9 @@ class Simulation:
         CONNECTIVITE_SBN, EYE_DISTANCE/ANGLE/DIRECTION_MIN/MAX (yeux de la
         population initiale), NUM_MD1_INIT, MD1_INIT_QTY (dépôts initiaux),
         DX_GRID (structurel : change les dimensions de la grille MD1/MD2),
-        TEST_NAME (nom du dossier de sortie).
+        RD_DT (structurel : pas de temps de la réaction-diffusion — cf. docstring
+        de ReactionDiffusion.set_coefficients, le champ n'est pas reconstruit
+        à chaud), TEST_NAME (nom du dossier de sortie).
         """
         # --- Réaction-diffusion : coefficients de diffusion/conversion (le champ
         #     MD1/MD2 est préservé, seuls les coefficients de Thomas sont recalés) ---
@@ -987,16 +998,18 @@ class Simulation:
             float(PARAMS.get("CONSUME_QTY", 100.0)),
             float(PARAMS.get("DIVISION_ENERGY", 600)),
             float(PARAMS.get("VALEUR_MAX_POIDS", 3)),
+            float(PARAMS.get("ROTATE_DEG", 5.0)),
         )
         if hot != self._hot_costs:
             (self.cost_neuron, self.cost_move, self.cost_rotate, self.cost_eat,
              self.cost_metabolism, self.consume_qty, self.division_energy,
-             self.valeur_max_poids) = hot
+             self.valeur_max_poids, self.rotate_deg) = hot
             for agent in self.agents:
                 agent.cost_neuron, agent.cost_move, agent.cost_rotate = (
                     self.cost_neuron, self.cost_move, self.cost_rotate)
                 agent.cost_eat, agent.cost_metabolism, agent.consume_qty = (
                     self.cost_eat, self.cost_metabolism, self.consume_qty)
+                agent.rotate_deg = self.rotate_deg
             self._hot_costs = hot
         # --- Probabilités de mutation (lues à la division, cf. step()) ---
         self.proba_deletion = float(PARAMS.get("PROBA_DELETION", 0.01))
@@ -1014,6 +1027,36 @@ class Simulation:
         self.distance_vision = int(PARAMS.get("DISTANCE_VISION", self.distance_manger))
         self.max_selected_sbn = int(PARAMS.get("MAX_SELECTED_SBN", 5))
         self.display_refresh_fps = int(PARAMS.get("DISPLAY_REFRESH_FPS", 30))
+        # --- Stabilité ADI : alerte console (rouge) à la transition faux→vrai ---
+        self._check_adi_stability()
+
+    def _check_adi_stability(self, on_restart=False):
+        """Stabilité du schéma ADI : c = 0.5·dt·D/dx² par matière (seuil 0.25).
+
+        Émet un message console ROUGE explicite et actionnable quand la
+        condition devient vraie (transition faux→vrai) — et aussi au Restart
+        si la condition y est vraie (on_restart=True). Pas de spam : un seul
+        message par transition.
+        """
+        try:
+            dx = float(PARAMS.get("DX_GRID", 20.0))
+            dt = float(PARAMS.get("RD_DT", 1.0))
+            d1 = float(PARAMS.get("D_MD1", 0.5))
+            d2 = float(PARAMS.get("D_MD2", 0.5))
+        except (TypeError, ValueError):
+            return
+        if dx <= 0:
+            return
+        c1 = 0.5 * dt * d1 / dx**2
+        c2 = 0.5 * dt * d2 / dx**2
+        unstable = (c1 > 0.25) or (c2 > 0.25)
+        if unstable and (on_restart or not self._adi_unstable):
+            worst = max(c1, c2)
+            self.console.error(
+                f"Stabilité ADI violée : c = 0.5·dt·D/dx² = {worst:.4f} > 0.25 "
+                f"(D_MD1={d1}, D_MD2={d2}, DX_GRID={dx}, RD_DT={dt}). "
+                f"Réduisez D ou augmentez DX_GRID/RD_DT.")
+        self._adi_unstable = unstable
 
     def step(self):
         """Avance la simulation d'un pas : agents puis réaction-diffusion."""

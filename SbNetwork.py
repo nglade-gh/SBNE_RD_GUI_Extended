@@ -89,9 +89,12 @@ class SbNetwork:
             self.weight_update(wmax)
 
     def weight_update(self, wmax):
+        # Dérive de poids bornée : le poids reste dans [-wmax, wmax] (2026-10-24).
         entry_node = random.randint(0, self.num_nodes - 1)
         exit_node = random.randint(0, self.num_nodes - 1)
-        self.weights[entry_node, exit_node] += random.randint(-1, 1)
+        wmax = max(0, int(wmax))
+        new_w = self.weights[entry_node, exit_node] + random.randint(-1, 1)
+        self.weights[entry_node, exit_node] = max(-wmax, min(wmax, new_w))
 
     def insertion(self, wmax):
         # wmax peut arriver en float (VALEUR_MAX_POIDS via PARAMS/explorateur) —
